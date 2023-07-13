@@ -107,6 +107,7 @@
 #include "cutlass/util/reference/host/tensor_copy.h"
 #include "cutlass/util/reference/device/tensor_fill.h"
 #include "cutlass/util/reference/host/tensor_norm.h"
+#include "cutlass/util/device_nhwc_pooling.h"
 
 #include "cutlass/layout/matrix.h"
 #include "cutlass/gemm/kernel/gemm_grouped.h"
@@ -118,7 +119,7 @@
 
 #include "cutlass/epilogue/threadblock/epilogue_with_visitor.h"
 #include "cutlass/fast_math.h"
-#include "kernel_forward.h"
+#include "sparse_kernel_forward.h"
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -291,9 +292,6 @@ struct Options {
       auto const& problem1 = problem_sizes1[i];
       for (int row = 0; row < problem0.m(); ++row) {
         int num_cols0 = problem0.n();
-        if (causal) {
-          num_cols0 = std::min(row + 1, num_cols0);
-        }
         // P <- Q . K_t
         fops += 2 * num_cols0 * problem0.k();
         // P <- exp(P - max(P))
@@ -375,6 +373,7 @@ private:
   std::vector<int64_t> ldp_host;
   std::vector<int64_t> ldv_host;
   std::vector<int64_t> ldo_host;
+  std::vector<uint8_t> ldmask_host;
   std::vector<int64_t> seqlen_host;
 
   cutlass::DeviceAllocation<int64_t> ldq;
@@ -382,6 +381,7 @@ private:
   cutlass::DeviceAllocation<int64_t> ldp;
   cutlass::DeviceAllocation<int64_t> ldv;
   cutlass::DeviceAllocation<int64_t> ldo;
+  cutlass::DeviceAllocation<uint8_t> ldmask;
   cutlass::DeviceAllocation<int64_t> seqlen;
 
   cutlass::DeviceAllocation<ElementQ> block_Q;
@@ -497,11 +497,16 @@ private:
     int64_t total_elements_V = 0;
     int64_t total_elements_O = 0;
 
+    // int64_t block_mask_size = (options.seq_length / Attention::kQueriesPerBlock) *
+    //   (options.seq_length * Attention::kKeysPerBlock);
+    int64_t block_mask_size = (options.seq_length / 64) * (options.seq_length * 64);
+
     ldq_host.resize(problem_count());
     ldk_host.resize(problem_count());
     ldp_host.resize(problem_count());
     ldv_host.resize(problem_count());
     ldo_host.resize(problem_count());
+    ldmask_host.resize(problem_count() * block_mask_size);
     seqlen_host.resize(problem_count());
 
     // Create tensors in BMHK format, where
@@ -527,6 +532,10 @@ private:
         ldp_host.at(i) = LayoutP::packed({problem0.m(), problem0.n()}).stride(0);
         ldv_host.at(i) = LayoutV::packed({problem1.k(), options.head_number * problem1.n()}).stride(0);
         ldo_host.at(i) = LayoutO::packed({problem1.m(), options.head_number * problem1.n()}).stride(0);
+
+        for (int32_t j = 0; j < block_mask_size; ++j) {
+          ldmask_host.at(i * block_mask_size + j) = (rand() % 10) == 0 ? 1 : 0;
+        }
 
         // m = n for attention problems.
         seqlen_host.at(i) = problem0.m();
@@ -566,6 +575,7 @@ private:
     ldp.reset(problem_count());
     ldv.reset(problem_count());
     ldo.reset(problem_count());
+    ldmask.reset(problem_count() * block_mask_size);
     seqlen.reset(problem_count());
 
     ldq.copy_from_host(ldq_host.data());
@@ -573,6 +583,7 @@ private:
     ldp.copy_from_host(ldp_host.data());
     ldv.copy_from_host(ldv_host.data());
     ldo.copy_from_host(ldo_host.data());
+    ldmask.copy_from_host(ldmask_host.data());
     seqlen.copy_from_host(seqlen_host.data());
 
     //
@@ -729,9 +740,6 @@ private:
         // Compute softmax for reference matrix
         for (int m = 0; m < problem0.m(); m++) {
           int n_dim_row = n_dim;
-          if (options.causal) {
-            n_dim_row = std::min(m + 1, n_dim);
-          }
           ElementSoftmaxCompute max = ElementSoftmaxCompute(view_Ref_host.ref().at({m, 0}));
           for (int n = 1; n < n_dim_row; n++) {
             max = std::max(max, ElementSoftmaxCompute(view_Ref_host.ref().at({m, n})));
@@ -835,6 +843,7 @@ public:
       p.query_ptr = block_Q.get();
       p.key_ptr = block_K.get();
       p.value_ptr = block_V.get();
+      p.block_mask_ptr = ldmask.get();
       p.logsumexp_ptr = nullptr; // Only needed for bw
       p.output_accum_ptr = nullptr;
       if (Attention::kNeedsOutputAccumulatorBuffer) {
@@ -856,9 +865,6 @@ public:
       p.head_dim_value = options.head_size_v;
       p.num_queries = options.seq_length;
       p.num_keys = options.seq_length_kv;
-      if (options.causal) {
-        p.custom_mask_type = Attention::CausalFromTopLeft;
-      }
 
       // All tensors are in BMHK shapes
       p.q_strideH = options.head_size;
