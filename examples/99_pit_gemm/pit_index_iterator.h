@@ -11,7 +11,7 @@ namespace threadblock {
 
 namespace pit {
 
-constexpr unsigned int SmemPow = 9; // 9 for blockDim.x == 64
+constexpr unsigned int SmemPow = 11; // 9 for blockDim.x == 64
 constexpr unsigned int SmemStages = 2;
 constexpr unsigned int SmemSize = 1 << SmemPow;
 constexpr unsigned int SmemMask = (SmemSize*SmemStages-1);
@@ -31,27 +31,27 @@ class IndexIterator {
     AccessType *frag_ptr_;
     int offset_x_;
     int smem_stage_;
-    const int matrix_size_x_;
-    const int block_size_x_;
-    const int block_size_y_;
-    const int block_num_tb_x_;
-    const int block_num_tb_y_;
-    const int block_num_matrix_x_;
-    const int block_num_smem_x_;
-    const int tb_offset_y_;
+    int matrix_size_x_;
+    int block_size_x_;
+    int block_size_y_;
+    int block_num_tb_x_;
+    int block_num_tb_y_;
+    int block_num_matrix_x_;
+    int block_num_smem_x_;
+    int tb_offset_y_;
 
   public:
     CUTLASS_DEVICE
     IndexIterator(
       SharedStorage& shared_storage_base,
       const int* idx,
-      const int matrix_size_x,
-      const int block_size_x,
-      const int block_size_y,
+      const int& matrix_size_x,
+      const int& block_size_x,
+      const int& block_size_y,
       const int tb_size_x,
       const int tb_size_y,
-      const int tb_idx_x,
-      const int tb_idx_y
+      const int& tb_idx_x,
+      const int& tb_idx_y
     ) : 
         smem_idx_(reinterpret_cast<int*>(&shared_storage_base.array)),
         gmem_idx_(const_cast<int*>(idx)),
@@ -71,18 +71,19 @@ class IndexIterator {
     }
 
     CUTLASS_DEVICE
-    int load_indices() {
+    void load_indices() {
+      CUTLASS_PRAGMA_UNROLL
       for (int i = threadIdx.x * 8; i < SmemSize; i += blockDim.x * 8) {
         int gidx_y = tb_offset_y_ + i / block_num_smem_x_;
         int gidx_x = offset_x_ + i % block_num_smem_x_;
-        if (gidx_x > matrix_size_x_) break;
+        if (gidx_x >= matrix_size_x_) break;
         AccessType const *access_ptr = reinterpret_cast<AccessType const *>(
           &gmem_idx_[gidx_y * block_num_matrix_x_ + gidx_x]);
         arch::global_load<AccessType, sizeof(AccessType), arch::CacheOperation::LastUse>(
           frag_ptr_[0], access_ptr, true);
         CUTLASS_PRAGMA_UNROLL
         for (int j = 0; j < 8; j++) {
-          smem_idx_[smem_stage_ * SmemSize + i + j] = frag_ptr_->at(j);
+          smem_idx_[smem_stage_ * SmemSize + i + j] = frag_ptr_->at(j) - 1;
         }
       }
       smem_stage_ ^= 1;
@@ -101,6 +102,7 @@ class IndexIterator {
       sidx_y += sidx_x / block_num_smem_x_ * block_num_tb_y_;
       sidx_x %= block_num_smem_x_;
       int sidx = sidx_y * block_num_smem_x_ + sidx_x;
+      // TODO: do not read if smem_idx_[sidx & SmemMask] == -1
       int real_col_idx = smem_idx_[sidx & SmemMask] * block_size_x_ + col_idx % block_size_x_;
       return row_idx * matrix_size_x_ + real_col_idx;
     }

@@ -213,7 +213,7 @@ struct PitGemm {
     typename cutlass::transform::threadblock::pit::IndexIterator pit_index_iterator(
       shared_storage.pit,
       &(params.pit_idx[0]),
-      params.problem_size.k()
+      params.problem_size.k(),
       params.pit_blocksize_x,
       params.pit_blocksize_y,
       Mma::Shape::kK, // TODO: check
@@ -551,7 +551,7 @@ struct PitGemm<Mma_, Epilogue_, ThreadblockSwizzle_, SplitKSerial, false> {
     typename cutlass::transform::threadblock::pit::IndexIterator pit_index_iterator(
       shared_storage.pit,
       &(params.pit_idx[0]),
-      params.problem_size.k()
+      params.problem_size.k(),
       params.pit_blocksize_x,
       params.pit_blocksize_y,
       Mma::Shape::kK, // TODO: check

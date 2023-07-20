@@ -28,7 +28,7 @@
 #include "cutlass/epilogue/threadblock/default_epilogue_wmma_tensor_op.h"
 #endif //CUTLASS_ARCH_WMMA_ENABLED
 
-#include "pit_gemm.h"
+#include "pit_gemm_kernel.h"
 #include "default_pit_mma.h"
 
 ////////////////////////////////////////////////////////////////////////////////

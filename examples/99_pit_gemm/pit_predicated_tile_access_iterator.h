@@ -354,13 +354,21 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::PitchLinear,
   }
 
   /// Returns a pointer
-  CUTLASS_HOST_DEVICE
-  AccessType *get() const {
+  // CUTLASS_HOST_DEVICE
+  // AccessType *get() const {
+  //   return reinterpret_cast<AccessType *>(
+  //       pointer_ + 
+  //       iteration_contiguous_ * (ThreadMap::Delta::kContiguous * sizeof_bits<Element>::value) / 8) + iteration_vector_;
+  // }
+
+  /// Returns a pointer
+  CUTLASS_DEVICE
+  AccessType *get() {
     int raw_offset = pointer_offset_ * 8 / sizeof_bits<Element>::value;
     if (kAdvanceRank) {
-        raw_offset += iteration_strided_ * ThreadMap::Delta::kStrided;
+      raw_offset += iteration_strided_ * ThreadMap::Delta::kStrided;
     } else {
-        raw_offset += iteration_contiguous_ * ThreadMap::Delta::kContiguous + iteration_vector_ * AccessType::kElements;
+      raw_offset += iteration_contiguous_ * ThreadMap::Delta::kContiguous + iteration_vector_ * AccessType::kElements;
     }
     int real_offset = pit_index_iterator_.get_real_offset(raw_offset);
     return reinterpret_cast<AccessType *>(pointer_ + real_offset * sizeof_bits<Element>::value / 8);
@@ -605,8 +613,8 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::ColumnMajor,
   }
 
   /// Returns a pointer
-  CUTLASS_HOST_DEVICE
-  AccessType *get() const {
+  CUTLASS_DEVICE
+  AccessType *get() {
     return reinterpret_cast<AccessType *>(iterator_.get());
   }
   
@@ -788,8 +796,8 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::RowMajor,
   }
 
   /// Returns a pointer
-  CUTLASS_HOST_DEVICE
-  AccessType *get() const {
+  CUTLASS_DEVICE
+  AccessType *get() {
     return reinterpret_cast<AccessType *>(iterator_.get());
   }
   
@@ -977,8 +985,8 @@ class PitPredicatedTileAccessIterator<Shape_, Element_,
   }
 
   /// Returns a pointer
-  CUTLASS_HOST_DEVICE
-  AccessType *get() const {
+  CUTLASS_DEVICE
+  AccessType *get() {
     return reinterpret_cast<AccessType *>(iterator_.get());
   }
   
@@ -1164,8 +1172,8 @@ class PitPredicatedTileAccessIterator<Shape_, Element_,
   }
 
   /// Returns a pointer
-  CUTLASS_HOST_DEVICE
-  AccessType *get() const {
+  CUTLASS_DEVICE
+  AccessType *get() {
     return reinterpret_cast<AccessType *>(iterator_.get());
   }
   

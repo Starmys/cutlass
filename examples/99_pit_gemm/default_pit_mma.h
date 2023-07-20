@@ -279,7 +279,7 @@ struct DefaultPitMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
   static_assert(kAlignmentA == 128 / sizeof_bits<ElementA>::value, 
     "Alignment must match thread data map's vector length");
 
-  static_assert(kAlignmentB ==128 / sizeof_bits<ElementB>::value,
+  static_assert(kAlignmentB == 128 / sizeof_bits<ElementB>::value,
     "Alignment must match thread data map's vector length");
 
   // Define iterators over tiles from the A operand
