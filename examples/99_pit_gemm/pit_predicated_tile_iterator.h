@@ -12,6 +12,7 @@ namespace transform {
 namespace threadblock {
 
 template <
+  typename PitIndexIterator,
   typename Shape,
   typename Element,
   typename Layout,
@@ -30,9 +31,9 @@ class PitPredicatedTileIterator;
 ///            WriteableContiguousTileIteratorConcept |
 ///            MaskedTileIteratorConcept
 ///
-template <typename Shape_, typename Element_, int AdvanceRank,
+template <typename PitIndexIterator, typename Shape_, typename Element_, int AdvanceRank,
           typename ThreadMap_, int AccessSize>
-class PitPredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRank,
+class PitPredicatedTileIterator<PitIndexIterator, Shape_, Element_, layout::PitchLinear, AdvanceRank,
                                 ThreadMap_, AccessSize> {
  public:
   static_assert(
@@ -61,7 +62,7 @@ class PitPredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRa
 
   /// Underlying iterator to compute the addresses
   using TileAccessIterator =
-      PitPredicatedTileAccessIterator<Shape, Element, Layout, kAdvanceRank, ThreadMap, AccessType>;
+      PitPredicatedTileAccessIterator<PitIndexIterator, Shape, Element, Layout, kAdvanceRank, ThreadMap, AccessType>;
 
   static int const kAccessesPerVector = TileAccessIterator::kAccessesPerVector;
 
@@ -273,13 +274,14 @@ class PitPredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRa
 ///            MaskedTileIteratorConcept
 ///
 template <
+ typename PitIndexIterator,
   typename Shape_,
   typename Element_,
   int AdvanceRank,
   typename ThreadMap_,
   int AccessSize
 >
-class PitPredicatedTileIterator<Shape_, Element_, layout::ColumnMajor, AdvanceRank, ThreadMap_, AccessSize> {
+class PitPredicatedTileIterator<PitIndexIterator, Shape_, Element_, layout::ColumnMajor, AdvanceRank, ThreadMap_, AccessSize> {
 public:
 
   static_assert(AdvanceRank == 0 || AdvanceRank == 1, 
@@ -303,6 +305,7 @@ public:
   using NonConstPointer = typename platform::remove_const<Element>::type *;
 
   using UnderlyingIterator = PitPredicatedTileIterator<
+    PitIndexIterator,
     layout::PitchLinearShape<Shape::kRow, Shape::kColumn>,
     Element,
     layout::PitchLinear,
@@ -482,13 +485,14 @@ public:
 ///            MaskedTileIteratorConcept
 ///
 template <
+  typename PitIndexIterator,
   typename Shape_,
   typename Element_,
   int AdvanceRank,
   typename ThreadMap_,
   int AccessSize
 >
-class PitPredicatedTileIterator<Shape_, Element_, layout::RowMajor, AdvanceRank, ThreadMap_, AccessSize> {
+class PitPredicatedTileIterator<PitIndexIterator, Shape_, Element_, layout::RowMajor, AdvanceRank, ThreadMap_, AccessSize> {
 public:
 
   static_assert(AdvanceRank == 0 || AdvanceRank == 1, 
@@ -512,6 +516,7 @@ public:
   using NonConstPointer = typename platform::remove_const<Element>::type *;
 
   using UnderlyingIterator = PitPredicatedTileIterator<
+    PitIndexIterator,
     layout::PitchLinearShape<Shape::kColumn, Shape::kRow>,
     Element,
     layout::PitchLinear,
@@ -692,9 +697,9 @@ public:
 ///            MaskedTileIteratorConcept
 ///
 
-template <typename Shape_, typename Element_, int AdvanceRank,
+template <typename PitIndexIterator, typename Shape_, typename Element_, int AdvanceRank,
           typename ThreadMap_, int AccessSize, int InterleavedK>
-class PitPredicatedTileIterator<Shape_, Element_,
+class PitPredicatedTileIterator<PitIndexIterator, Shape_, Element_,
                              layout::ColumnMajorInterleaved<InterleavedK>,
                              AdvanceRank, ThreadMap_, AccessSize> {
  public:
@@ -721,6 +726,7 @@ class PitPredicatedTileIterator<Shape_, Element_,
   using NonConstPointer = typename platform::remove_const<Element>::type *;
 
   using UnderlyingIterator = PitPredicatedTileIterator<
+      PitIndexIterator,
       layout::PitchLinearShape<Shape::kRow * kInterleavedK,
                                Shape::kColumn / kInterleavedK>,
       Element, layout::PitchLinear, (kAdvanceRank == 0 ? 0 : 1), ThreadMap, AccessSize>;
@@ -877,9 +883,9 @@ class PitPredicatedTileIterator<Shape_, Element_,
 ///            WriteableContiguousTileIteratorConcept |
 ///            MaskedTileIteratorConcept
 ///
-template <typename Shape_, typename Element_, int AdvanceRank,
+template <typename PitIndexIterator, typename Shape_, typename Element_, int AdvanceRank,
           typename ThreadMap_, int AccessSize, int InterleavedK>
-class PitPredicatedTileIterator<Shape_, Element_,
+class PitPredicatedTileIterator<PitIndexIterator, Shape_, Element_,
                              layout::RowMajorInterleaved<InterleavedK>,
                              AdvanceRank, ThreadMap_, AccessSize> {
  public:
@@ -906,6 +912,7 @@ class PitPredicatedTileIterator<Shape_, Element_,
   using NonConstPointer = typename platform::remove_const<Element>::type *;
 
   using UnderlyingIterator = PitPredicatedTileIterator<
+      PitIndexIterator,
       layout::PitchLinearShape<Shape::kColumn * kInterleavedK,
                                Shape::kRow / kInterleavedK>,
       Element, layout::PitchLinear, (kAdvanceRank == 0 ? 1 : 0), ThreadMap, AccessSize>;

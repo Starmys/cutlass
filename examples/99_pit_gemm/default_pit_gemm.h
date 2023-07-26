@@ -28,6 +28,7 @@
 #include "cutlass/epilogue/threadblock/default_epilogue_wmma_tensor_op.h"
 #endif //CUTLASS_ARCH_WMMA_ENABLED
 
+#include "pit_index_iterator.h"
 #include "pit_gemm_kernel.h"
 #include "default_pit_mma.h"
 
@@ -62,6 +63,8 @@ template <
     typename OperatorClass,
     /// Tag indicating architecture to tune for
     typename ArchTag,
+    /// PIT Block Shape
+    typename PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
@@ -104,6 +107,8 @@ template <
     typename ElementC,
     /// Element type for internal accumulation
     typename ElementAccumulator,
+    /// PIT Block Shape
+    typename PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
@@ -126,11 +131,18 @@ template <
 >
 struct DefaultPitGemm<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignmentB, ElementC,
                    layout::RowMajor, ElementAccumulator, arch::OpClassTensorOp,
-                   arch::Sm80, ThreadblockShape, WarpShape, InstructionShape,
+                   arch::Sm80, PitBlockShape, ThreadblockShape, WarpShape, InstructionShape,
                    EpilogueOutputOp, ThreadblockSwizzle, Stages, SplitKSerial,
                    Operator, IsASparse> {
+  /// Define the PIT block index iterator
+  using TileShape = cutlass::PitchLinearShape<ThreadblockShape::kK,
+    (IsASparse ? ThreadblockShape::kM : ThreadblockShape::kN)>;
+  using PitIndexIterator = cutlass::transform::threadblock::pit::IndexIterator<
+      TileShape, PitBlockShape>;
+
   /// Define the threadblock-scoped matrix multiply-accumulate
   using Mma = typename cutlass::gemm::threadblock::DefaultPitMma<
+      PitIndexIterator,
       ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignmentB,
       ElementAccumulator, layout::RowMajor, arch::OpClassTensorOp, arch::Sm80,
       ThreadblockShape, WarpShape, InstructionShape, Stages,
@@ -145,7 +157,7 @@ struct DefaultPitGemm<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignm
           EpilogueOutputOp::kCount>::Epilogue;
 
   /// Define the kernel-level GEMM operator.
-  using GemmKernel = kernel::PitGemm<Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
+  using GemmKernel = kernel::PitGemm<PitIndexIterator, Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
 };
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -167,6 +179,8 @@ template <
   typename ElementC,
   /// Element type for internal accumulation
   typename ElementAccumulator,
+  /// PIT Block Shape
+  typename PitBlockShape,
   /// Threadblock-level tile size (concept: GemmShape)
   typename ThreadblockShape,
   /// Warp-level tile size (concept: GemmShape)
@@ -191,6 +205,7 @@ struct DefaultPitGemm<
   ElementAccumulator,
   arch::OpClassTensorOp,
   arch::Sm75,
+  PitBlockShape,
   ThreadblockShape,
   WarpShape,
   InstructionShape,
@@ -201,9 +216,15 @@ struct DefaultPitGemm<
   Operator,
   IsASparse
 > {
+  /// Define the PIT block index iterator
+  using TileShape = cutlass::PitchLinearShape<ThreadblockShape::kK,
+    (IsASparse ? ThreadblockShape::kM : ThreadblockShape::kN)>;
+  using PitIndexIterator = cutlass::transform::threadblock::pit::IndexIterator<
+      TileShape, PitBlockShape>;
 
   /// Define the threadblock-scoped matrix multiply-accumulate
   using Mma = typename cutlass::gemm::threadblock::DefaultPitMma<
+    PitIndexIterator,
     ElementA,
     LayoutA,
     kAlignmentA,
@@ -233,7 +254,7 @@ struct DefaultPitGemm<
   >::Epilogue;
 
   /// Define the kernel-level GEMM operator.
-  using GemmKernel = kernel::PitGemm<Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
+  using GemmKernel = kernel::PitGemm<PitIndexIterator, Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -250,6 +271,8 @@ template <
     int kAlignmentB,
     /// Element type for C and D matrix operands
     typename ElementC,
+    /// PIT Block Shape
+    typename PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
@@ -275,7 +298,7 @@ struct DefaultPitGemm<
     ElementA, layout::ColumnMajorInterleaved<InterleavedK>, kAlignmentA,
     ElementB, layout::RowMajorInterleaved<InterleavedK>, kAlignmentB, ElementC,
     layout::ColumnMajorInterleaved<InterleavedK>, int32_t,
-    arch::OpClassTensorOp, arch::Sm80, ThreadblockShape, WarpShape,
+    arch::OpClassTensorOp, arch::Sm80, PitBlockShape, ThreadblockShape, WarpShape,
     InstructionShape, EpilogueOutputOp, ThreadblockSwizzle, Stages,
     SplitKSerial, Operator, IsASparse> {
   using LayoutA = layout::ColumnMajorInterleaved<InterleavedK>;
@@ -284,8 +307,15 @@ struct DefaultPitGemm<
 
   using ElementAccumulator = int32_t;
 
+  /// Define the PIT block index iterator
+  using TileShape = cutlass::PitchLinearShape<ThreadblockShape::kK,
+    (IsASparse ? ThreadblockShape::kM : ThreadblockShape::kN)>;
+  using PitIndexIterator = cutlass::transform::threadblock::pit::IndexIterator<
+      TileShape, PitBlockShape>;
+
   /// Define the threadblock-scoped matrix multiply-accumulate
   using Mma = typename cutlass::gemm::threadblock::DefaultPitMma<
+      PitIndexIterator,
       ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignmentB,
       ElementAccumulator, LayoutC, arch::OpClassTensorOp, arch::Sm80,
       ThreadblockShape, WarpShape, InstructionShape, Stages, Operator,
@@ -300,7 +330,7 @@ struct DefaultPitGemm<
           64 / sizeof_bits<ElementC>::value, InterleavedK>::Epilogue;
 
   /// Define the kernel-level GEMM operator.
-  using GemmKernel = kernel::PitGemm<Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
+  using GemmKernel = kernel::PitGemm<PitIndexIterator, Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -317,6 +347,8 @@ template <
     int kAlignmentB,
     /// Element type for C and D matrix operands
     typename ElementC,
+    /// PIT Block Shape
+    typename PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
@@ -340,7 +372,7 @@ struct DefaultPitGemm<ElementA, layout::ColumnMajorInterleaved<InterleavedK>,
                    kAlignmentA, ElementB,
                    layout::RowMajorInterleaved<InterleavedK>, kAlignmentB,
                    ElementC, layout::ColumnMajorInterleaved<InterleavedK>,
-                   int32_t, arch::OpClassTensorOp, arch::Sm75, ThreadblockShape,
+                   int32_t, arch::OpClassTensorOp, arch::Sm75, PitBlockShape, ThreadblockShape,
                    WarpShape, InstructionShape, EpilogueOutputOp,
                    ThreadblockSwizzle, 2, SplitKSerial, Operator, IsASparse> {
   using LayoutA = layout::ColumnMajorInterleaved<InterleavedK>;
@@ -349,8 +381,15 @@ struct DefaultPitGemm<ElementA, layout::ColumnMajorInterleaved<InterleavedK>,
 
   using ElementAccumulator = int32_t;
 
+  /// Define the PIT block index iterator
+  using TileShape = cutlass::PitchLinearShape<ThreadblockShape::kK,
+    (IsASparse ? ThreadblockShape::kM : ThreadblockShape::kN)>;
+  using PitIndexIterator = cutlass::transform::threadblock::pit::IndexIterator<
+      TileShape, PitBlockShape>;
+
   /// Define the threadblock-scoped matrix multiply-accumulate
   using Mma = typename cutlass::gemm::threadblock::DefaultPitMma<
+      PitIndexIterator,
       ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignmentB, ElementAccumulator, LayoutC,
       arch::OpClassTensorOp, arch::Sm75, ThreadblockShape, WarpShape,
       InstructionShape, 2, Operator, true>::ThreadblockMma;
@@ -364,7 +403,7 @@ struct DefaultPitGemm<ElementA, layout::ColumnMajorInterleaved<InterleavedK>,
           64 / sizeof_bits<ElementC>::value, InterleavedK>::Epilogue;
 
   /// Define the kernel-level GEMM operator.
-  using GemmKernel = kernel::PitGemm<Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
+  using GemmKernel = kernel::PitGemm<PitIndexIterator, Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -388,6 +427,8 @@ template <
   typename ElementC,
   /// Element type for internal accumulation
   typename ElementAccumulator,
+  /// PIT Block Shape
+  typename PitBlockShape,
   /// Threadblock-level tile size (concept: GemmShape)
   typename ThreadblockShape,
   /// Warp-level tile size (concept: GemmShape)
@@ -410,6 +451,7 @@ struct DefaultPitGemm<
   ElementAccumulator,
   arch::OpClassTensorOp,
   arch::Sm70,
+  PitBlockShape,
   ThreadblockShape,
   WarpShape,
   GemmShape<8, 8, 4>,
@@ -420,9 +462,15 @@ struct DefaultPitGemm<
   Operator,
   IsASparse
 > {
+  /// Define the PIT block index iterator
+  using TileShape = cutlass::PitchLinearShape<ThreadblockShape::kK,
+    (IsASparse ? ThreadblockShape::kM : ThreadblockShape::kN)>;
+  using PitIndexIterator = cutlass::transform::threadblock::pit::IndexIterator<
+      TileShape, PitBlockShape>;
 
   /// Define the threadblock-scoped matrix multiply-accumulate
   using Mma = typename cutlass::gemm::threadblock::DefaultPitMma<
+    PitIndexIterator,
     ElementA,
     LayoutA,
     kAlignmentA,
@@ -452,7 +500,7 @@ struct DefaultPitGemm<
   >::Epilogue;
 
   /// Define the kernel-level GEMM operator.
-  using GemmKernel = kernel::PitGemm<Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
+  using GemmKernel = kernel::PitGemm<PitIndexIterator, Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -477,6 +525,8 @@ template <
     typename ElementAccumulator,
     /// Tag indicating architecture to tune for
     typename ArchTag,
+    /// PIT Block Shape
+    typename PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
@@ -504,6 +554,7 @@ struct DefaultPitGemm<
     ElementAccumulator,
     arch::OpClassSimt,
     ArchTag,
+    PitBlockShape,
     ThreadblockShape,
     WarpShape,
     GemmShape<1, 1, 1>,
@@ -513,8 +564,15 @@ struct DefaultPitGemm<
     SplitKSerial,
     Operator,
     IsASparse> {
+  /// Define the PIT block index iterator
+  using TileShape = cutlass::PitchLinearShape<ThreadblockShape::kK,
+    (IsASparse ? ThreadblockShape::kM : ThreadblockShape::kN)>;
+  using PitIndexIterator = cutlass::transform::threadblock::pit::IndexIterator<
+      TileShape, PitBlockShape>;
+
   /// Define the threadblock-scoped matrix multiply-accumulate
   using Mma = typename cutlass::gemm::threadblock::DefaultPitMma<
+      PitIndexIterator,
       ElementA,
       LayoutA,
       kAlignmentA,
@@ -543,7 +601,7 @@ struct DefaultPitGemm<
       >::Epilogue;
 
   /// Define the kernel-level GEMM operator.
-  using GemmKernel = kernel::PitGemm<Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
+  using GemmKernel = kernel::PitGemm<PitIndexIterator, Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -566,6 +624,8 @@ template <
     typename ElementC,
     /// Element type for internal accumulation
     typename ElementAccumulator,
+    /// PIT Block Shape
+    typename PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
@@ -594,6 +654,7 @@ struct DefaultPitGemm<ElementA,
                    ElementAccumulator,
                    arch::OpClassSimt,
                    arch::Sm80,
+                   PitBlockShape,
                    ThreadblockShape,
                    WarpShape,
                    GemmShape<1, 1, 1>,
@@ -603,9 +664,15 @@ struct DefaultPitGemm<ElementA,
                    SplitKSerial,
                    Operator,
                    IsASparse> {
+  /// Define the PIT block index iterator
+  using TileShape = cutlass::PitchLinearShape<ThreadblockShape::kK,
+    (IsASparse ? ThreadblockShape::kM : ThreadblockShape::kN)>;
+  using PitIndexIterator = cutlass::transform::threadblock::pit::IndexIterator<
+      TileShape, PitBlockShape>;
 
   /// Define the threadblock-scoped matrix multiply-accumulate
   using Mma = typename cutlass::gemm::threadblock::DefaultPitMma<
+      PitIndexIterator,
       ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignmentB,
       ElementAccumulator, layout::RowMajor, arch::OpClassSimt, arch::Sm80,
       ThreadblockShape, WarpShape, GemmShape<1, 1, 1>, Stages,
@@ -623,7 +690,7 @@ struct DefaultPitGemm<ElementA,
       >::Epilogue;
 
   /// Define the kernel-level GEMM operator.
-  using GemmKernel = kernel::PitGemm<Mma, Epilogue, ThreadblockSwizzle, SplitKSerial,IsASparse>;
+  using GemmKernel = kernel::PitGemm<PitIndexIterator, Mma, Epilogue, ThreadblockSwizzle, SplitKSerial,IsASparse>;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -646,6 +713,8 @@ template <
     typename ArchTag,
     /// Element type for internal accumulation
     typename ElementAccumulator,
+    /// PIT Block Shape
+    typename PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
@@ -664,7 +733,7 @@ template <
     >
 struct DefaultPitGemm<int8_t, LayoutA, kAlignmentA, int8_t, LayoutB, kAlignmentB,
                    ElementC, LayoutC, ElementAccumulator, arch::OpClassSimt,
-                   ArchTag, ThreadblockShape, WarpShape, GemmShape<1, 1, 4>,
+                   ArchTag, PitBlockShape, ThreadblockShape, WarpShape, GemmShape<1, 1, 4>,
                    EpilogueOutputOp, ThreadblockSwizzle, 2, SplitKSerial,
                    Operator, IsASparse> {
   using InstructionShape = GemmShape<1, 1, 4>;
@@ -672,8 +741,17 @@ struct DefaultPitGemm<int8_t, LayoutA, kAlignmentA, int8_t, LayoutB, kAlignmentB
   using ElementB = int8_t;
 
   using OperatorClass =  arch::OpClassSimt;
+
+  /// Define the PIT block index iterator
+  using TileShape = cutlass::PitchLinearShape<ThreadblockShape::kK,
+    (IsASparse ? ThreadblockShape::kM : ThreadblockShape::kN)>;
+  using PitIndexIterator = cutlass::transform::threadblock::pit::IndexIterator<
+      TileShape, PitBlockShape>;
+
   /// Define the threadblock-scoped matrix multiply-accumulate
-  using Mma = typename cutlass::gemm::threadblock::DefaultPitMma<ElementA,
+  using Mma = typename cutlass::gemm::threadblock::DefaultPitMma<
+      PitIndexIterator,
+      ElementA,
       LayoutA,
       kAlignmentA,
       ElementB,
@@ -702,7 +780,7 @@ struct DefaultPitGemm<int8_t, LayoutA, kAlignmentA, int8_t, LayoutB, kAlignmentB
       >::Epilogue;
 
   /// Define the kernel-level GEMM operator.
-  using GemmKernel = kernel::PitGemm<Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
+  using GemmKernel = kernel::PitGemm<PitIndexIterator, Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
 };
 
 #if defined(CUTLASS_ARCH_WMMA_ENABLED)
@@ -729,6 +807,8 @@ template <
     typename ElementAccumulator,
     /// Tag indicating architecture to tune for
     typename ArchTag,
+    /// PIT Block Shape
+    typename PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
@@ -755,7 +835,8 @@ struct DefaultPitGemm<
   ElementC, LayoutC, 
   ElementAccumulator, 
   arch::OpClassWmmaTensorOp,
-  ArchTag, 
+  ArchTag,
+  PitBlockShape,
   ThreadblockShape, WarpShape, InstructionShape,
   EpilogueOutputOp, 
   ThreadblockSwizzle, 
@@ -763,8 +844,15 @@ struct DefaultPitGemm<
   SplitKSerial,
   Operator,
   IsASparse> {
+  /// Define the PIT block index iterator
+  using TileShape = cutlass::PitchLinearShape<ThreadblockShape::kK,
+    (IsASparse ? ThreadblockShape::kM : ThreadblockShape::kN)>;
+  using PitIndexIterator = cutlass::transform::threadblock::pit::IndexIterator<
+      TileShape, PitBlockShape>;
+
   /// Define the threadblock-scoped matrix multiply-accumulate
   using Mma = typename cutlass::gemm::threadblock::DefaultPitMma<
+      PitIndexIterator,
       ElementA, LayoutA, kAlignmentA,
       ElementB, LayoutB, kAlignmentB,
       ElementAccumulator, LayoutC, 
@@ -788,7 +876,7 @@ struct DefaultPitGemm<
   >::Epilogue;
 
   /// Define the kernel-level GEMM operator.
-  using GemmKernel = kernel::PitGemm<Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
+  using GemmKernel = kernel::PitGemm<PitIndexIterator, Mma, Epilogue, ThreadblockSwizzle, SplitKSerial, IsASparse>;
 };
 ////////////////////////////////////////////////////////////////////////////////
 #endif //CUTLASS_ARCH_WMMA_ENABLED

@@ -18,6 +18,8 @@ namespace gemm {
 namespace device {
 
 template <
+    /// PIT Block Shape
+    typename PITBlockShape_,
     /// Element type for A matrix operand
     typename ElementA_,
     /// Layout type for A matrix operand
@@ -92,6 +94,7 @@ class PitGemm {
   using ElementAccumulator = ElementAccumulator_;
   using OperatorClass = OperatorClass_;
   using ArchTag = ArchTag_;
+  using PITBlockShape = PITBlockShape_;
   using ThreadblockShape = ThreadblockShape_;
   using WarpShape = WarpShape_;
   using InstructionShape = InstructionShape_;
@@ -120,6 +123,7 @@ class PitGemm {
     ElementAccumulator,
     OperatorClass,
     ArchTag,
+    PITBlockShape,
     ThreadblockShape,
     WarpShape,
     InstructionShape,
@@ -144,8 +148,6 @@ class PitGemm {
     TensorRef<ElementC const, LayoutC> ref_C;
     TensorRef<ElementC, LayoutC> ref_D;
     const int* pit_idx;
-    int pit_blocksize_x;
-    int pit_blocksize_y;
     typename EpilogueOutputOp::Params epilogue;
     int split_k_slices;
 
@@ -168,8 +170,6 @@ class PitGemm {
       TensorRef<ElementC const, LayoutC> ref_C_,
       TensorRef<ElementC, LayoutC> ref_D_,
       const int* pit_idx_,
-      int pit_blocksize_x_,
-      int pit_blocksize_y_,
       typename EpilogueOutputOp::Params epilogue_ = 
         typename EpilogueOutputOp::Params(),
       int split_k_slices = 1
@@ -180,8 +180,6 @@ class PitGemm {
       ref_C(ref_C_),
       ref_D(ref_D_),
       pit_idx(pit_idx_),
-      pit_blocksize_x(pit_blocksize_x_),
-      pit_blocksize_y(pit_blocksize_y_),
       epilogue(epilogue_),
       split_k_slices(split_k_slices) {
 
@@ -251,8 +249,6 @@ public:
       args.ref_C.non_const_ref(),
       args.ref_D,
       args.pit_idx,
-      args.pit_blocksize_x,
-      args.pit_blocksize_y,
       args.epilogue,
       static_cast<int *>(workspace)
     };
@@ -368,6 +364,8 @@ public:
 
 /// Partial specialization for column-major output exchanges problem size and operand.
 template <
+    /// PIT Block Shape
+    typename PITBlockShape_,
     /// Element type for A matrix operand
     typename ElementA_,
     /// Layout type for A matrix operand
@@ -406,7 +404,7 @@ template <
     typename Operator_,
     /// Sparse matrix is A or not
     bool IsASparse>
-class PitGemm<ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC_,
+class PitGemm<PITBlockShape_, ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC_,
            layout::ColumnMajor,  // partially specialized on LayoutC
            ElementAccumulator_, OperatorClass_, ArchTag_, ThreadblockShape_,
            WarpShape_, InstructionShape_, EpilogueOutputOp_,
@@ -427,6 +425,7 @@ class PitGemm<ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC_,
   using ElementAccumulator = ElementAccumulator_;
   using OperatorClass = OperatorClass_;
   using ArchTag = ArchTag_;
+  using PITBlockShape = PITBlockShape_;
   using ThreadblockShape = ThreadblockShape_;
   using WarpShape = WarpShape_;
   using InstructionShape = InstructionShape_;
@@ -442,6 +441,7 @@ class PitGemm<ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC_,
   static bool const kIsASparse = false;
 
   using UnderlyingOperator = PitGemm< 
+    PITBlockShape,
     ElementB,
     typename layout::LayoutTranspose<LayoutB>::type,
     ElementA,
@@ -481,8 +481,6 @@ class PitGemm<ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC_,
     TensorRef<ElementC const, LayoutC> ref_C;
     TensorRef<ElementC, LayoutC> ref_D;
     const int* pit_idx;
-    int pit_blocksize_x;
-    int pit_blocksize_y;
     typename EpilogueOutputOp::Params epilogue;
     int split_k_slices;
 
@@ -503,8 +501,6 @@ class PitGemm<ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC_,
       TensorRef<ElementC const, LayoutC> ref_C_,
       TensorRef<ElementC, LayoutC> ref_D_,
       const int* pit_idx_,
-      int pit_blocksize_x_,
-      int pit_blocksize_y_,
       typename EpilogueOutputOp::Params epilogue_ = 
         typename EpilogueOutputOp::Params(),
       int split_k_slices = 1
@@ -515,8 +511,6 @@ class PitGemm<ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC_,
       ref_C(ref_C_),
       ref_D(ref_D_),
       pit_idx(pit_idx_),
-      pit_blocksize_x(pit_blocksize_x_),
-      pit_blocksize_y(pit_blocksize_y_),
       epilogue(epilogue_),
       split_k_slices(split_k_slices) { }
   };
@@ -539,8 +533,6 @@ public:
       {args.ref_C.data(), args.ref_C.stride(0)},
       {args.ref_D.data(), args.ref_D.stride(0)},
       args.pit_idx,
-      args.pit_blocksize_x,
-      args.pit_blocksize_y,
       args.epilogue,
       args.split_k_slices
     );

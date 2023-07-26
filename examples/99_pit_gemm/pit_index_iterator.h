@@ -11,100 +11,137 @@ namespace threadblock {
 
 namespace pit {
 
-constexpr unsigned int SmemPow = 11; // 9 for blockDim.x == 64
+// SmemSize >= blockDim.x * (sizeof(AccessType) / sizeof(Index)) = 128 * 8
+// SmemSize >= ThreadBlockShape / PitBlockShape = (128 * 32) / (1 * 8)
+constexpr unsigned int SmemPow = 10;
 constexpr unsigned int SmemStages = 2;
 constexpr unsigned int SmemSize = 1 << SmemPow;
-constexpr unsigned int SmemMask = (SmemSize*SmemStages-1);
+constexpr unsigned int SmemMask = (SmemSize * SmemStages - 1);
 
 class SharedStorage {
   public:
     Array<int, SmemSize*SmemStages> array;
 };
 
+template <typename ThreadBlockShape_, typename PitBlockShape_>
 class IndexIterator {
+
   public:
+    using Layout = layout::PitchLinear;
+    using BytePointer = char *;
     using AccessType = AlignedArray<int, 8>;
+    using TensorCoord = Layout::TensorCoord;
+    using ThreadBlockShape = ThreadBlockShape_;
+    using PitBlockShape = PitBlockShape_;
+
+    static int const kBlocksPerTileContiguous = ThreadBlockShape_::kContiguous / PitBlockShape_::kContiguous;
+    static int const kBlocksPerTileStrided = ThreadBlockShape_::kStrided / PitBlockShape_::kStrided;
+    static int const kTilesPerLoad = SmemSize / (kBlocksPerTileContiguous * kBlocksPerTileStrided);
+    static int const kBlocksPerLoadContiguous = kTilesPerLoad * kBlocksPerTileContiguous;
 
   private:
-    const int *gmem_idx_;
-    int *smem_idx_;
-    AccessType *frag_ptr_;
-    int offset_x_;
+    const int *gmem_ptr_;
+    const BytePointer zero_ptr_; // point to an array of zeros in the global memory
+    int *smem_ptr_;
+    AccessType frag;
+    TensorCoord extent_;
+    int blocks_per_row; // number of PIT blocks in a row
+    int tile_offset_; // along the contiguous axis
+    int block_offset_; // along the contiguous axis
     int smem_stage_;
-    int matrix_size_x_;
-    int block_size_x_;
-    int block_size_y_;
-    int block_num_tb_x_;
-    int block_num_tb_y_;
-    int block_num_matrix_x_;
-    int block_num_smem_x_;
-    int tb_offset_y_;
 
   public:
     CUTLASS_DEVICE
     IndexIterator(
       SharedStorage& shared_storage_base,
-      const int* idx,
-      const int& matrix_size_x,
-      const int& block_size_x,
-      const int& block_size_y,
-      const int tb_size_x,
-      const int tb_size_y,
-      const int& tb_idx_x,
-      const int& tb_idx_y
-    ) : 
-        smem_idx_(reinterpret_cast<int*>(&shared_storage_base.array)),
-        gmem_idx_(const_cast<int*>(idx)),
-        matrix_size_x_(matrix_size_x),
-        block_size_x_(block_size_x),
-        block_size_y_(block_size_y),
-        block_num_tb_x_(tb_size_x / block_size_x),
-        block_num_tb_y_(tb_size_y / block_size_y),
-        block_num_matrix_x_((matrix_size_x_ + block_size_x_ - 1) / block_size_x_),
-        block_num_smem_x_(SmemSize / block_num_tb_y_),
-        tb_offset_y_(tb_idx_y * block_num_tb_y_) {
-      int frag[8] = { 0 };
-      frag_ptr_ = reinterpret_cast<AccessType *>(&frag);
-      offset_x_ = 0;
-      load_indices();
+      const int* gmem_ptr,
+      const BytePointer zero_ptr,
+      TensorCoord extent, // of the sparse tensor
+      TensorCoord const &threadblock_offset, // of the sparse tensor
+      int thread_id)
+      : smem_ptr_(reinterpret_cast<int*>(&shared_storage_base.array)),
+        gmem_ptr_(const_cast<int*>(gmem_ptr)),
+        zero_ptr_(zero_ptr),
+        extent_(extent) {
+
+      blocks_per_row = (extent_.contiguous() + PitBlockShape::kContiguous - 1) / PitBlockShape::kContiguous;
+      gmem_ptr += threadblock_offset.strided() / PitBlockShape::kStrided * blocks_per_row;
+      tile_offset_ = 0;
+      block_offset_ = 0;
+      smem_stage_ = 0;
+      load_indices(0);
       __syncthreads();
     }
 
     CUTLASS_DEVICE
-    void load_indices() {
-      CUTLASS_PRAGMA_UNROLL
-      for (int i = threadIdx.x * 8; i < SmemSize; i += blockDim.x * 8) {
-        int gidx_y = tb_offset_y_ + i / block_num_smem_x_;
-        int gidx_x = offset_x_ + i % block_num_smem_x_;
-        if (gidx_x >= matrix_size_x_) break;
-        AccessType const *access_ptr = reinterpret_cast<AccessType const *>(
-          &gmem_idx_[gidx_y * block_num_matrix_x_ + gidx_x]);
-        arch::global_load<AccessType, sizeof(AccessType), arch::CacheOperation::LastUse>(
-          frag_ptr_[0], access_ptr, true);
+    void load_indices(int target_tile_offset) {
+      if (tile_offset_ <= target_tile_offset && block_offset_ < blocks_per_row) {
         CUTLASS_PRAGMA_UNROLL
-        for (int j = 0; j < 8; j++) {
-          smem_idx_[smem_stage_ * SmemSize + i + j] = frag_ptr_->at(j) - 1;
+        for (int i = threadIdx.x * AccessType::kElements; i < SmemSize; i += blockDim.x * AccessType::kElements) {
+          int y = i / kBlocksPerLoadContiguous;
+          int x = block_offset_ + i % kBlocksPerLoadContiguous;
+          if (x < blocks_per_row) {
+            AccessType const *access_ptr = reinterpret_cast<AccessType const *>(&gmem_ptr_[y * blocks_per_row + x]);
+            arch::global_load<AccessType, sizeof(AccessType), arch::CacheOperation::LastUse>(frag, access_ptr, true);
+            CUTLASS_PRAGMA_UNROLL
+            for (int j = 0; j < AccessType::kElements; j++) {
+              smem_ptr_[smem_stage_ * SmemSize + i + j] = frag.at(j) - 1;
+            }
+          }
         }
+        smem_stage_ ^= 1;
+        tile_offset_ += kTilesPerLoad;
+        block_offset_ += kBlocksPerLoadContiguous;
       }
-      smem_stage_ ^= 1;
-      offset_x_ += block_num_smem_x_;
+      // if (threadIdx.x == 0) {
+      //   std::printf(
+      //     "[bid = %d] target_tile_offset = %d, tile_offset_ = %d, block_offset_ = %d, smem[0] = %d\n",
+      //     int(blockIdx.x),
+      //     int(target_tile_offset),
+      //     int(tile_offset_),
+      //     int(block_offset_),
+      //     int(smem_ptr_[smem_stage_ * SmemSize])
+      //   );
+      // }
+      // if (blockIdx.x == 0) {
+      //   TensorCoord thread_offset = ThreadMap::initial_offset(thread_id);
+      //   std::printf(
+      //     "[tid = (%d)] thread_offset = (%d, %d)\n",
+      //     int(threadIdx.x),
+      //     int(thread_offset.strided()),
+      //     int(thread_offset.contiguous())
+      //   );
+      // }
     }
 
     CUTLASS_DEVICE
     int get_real_offset(const int& offset) {
-      int row_idx = offset / matrix_size_x_;
-      int col_idx = offset % matrix_size_x_;
-      int sidx_y = row_idx / block_size_y_;
-      int sidx_x = col_idx / block_size_x_;
-      if (sidx_x >= offset_x_) {
-        load_indices();
+      int y = ((offset / extent_.contiguous()) % ThreadBlockShape::kStrided) / PitBlockShape::kStrided;
+      int x = (offset % extent_.contiguous()) / PitBlockShape::kContiguous;
+      // int smem_offset = (x / kBlocksPerLoadContiguous * kBlocksPerTileStrided + y) * kBlocksPerLoadContiguous
+      //                 + x % kBlocksPerLoadContiguous;
+      // int block_idx = smem_ptr_[smem_offset & SmemMask];
+      int block_idx = gmem_ptr_[y * blocks_per_row + x] - 1;
+      if (blockIdx.x == 1) {
+        std::printf(
+          "[bid = %d, tid = %d] y = %d, x = %d -> %d\n",
+          int(blockIdx.x),
+          int(threadIdx.x),
+          int(offset / extent_.contiguous()),
+          int(x),
+          int(block_idx)
+        );
       }
-      sidx_y += sidx_x / block_num_smem_x_ * block_num_tb_y_;
-      sidx_x %= block_num_smem_x_;
-      int sidx = sidx_y * block_num_smem_x_ + sidx_x;
-      // TODO: do not read if smem_idx_[sidx & SmemMask] == -1
-      int real_col_idx = smem_idx_[sidx & SmemMask] * block_size_x_ + col_idx % block_size_x_;
-      return row_idx * matrix_size_x_ + real_col_idx;
+      if (block_idx < 0) {
+        return -1;
+      } else {
+        return offset + (block_idx - x) * PitBlockShape::kContiguous;
+      }
+    }
+
+    CUTLASS_DEVICE
+    BytePointer get_zero_pointer() {
+      return zero_ptr_;
     }
 };
 

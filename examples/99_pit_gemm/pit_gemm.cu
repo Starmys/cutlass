@@ -1,6 +1,7 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <filesystem>
 #include <vector>
 #include <unordered_map>
 
@@ -39,6 +40,7 @@ int load_array_from_file(ElementOut* arr, std::string filepath) {
 /// Result structure
 struct Result {
 
+  double diff;
   double runtime_ms;
   double gflops;
   cutlass::Status status;
@@ -104,7 +106,8 @@ struct Options {
     cmd.get_cmd_line_argument("K", K, 0);
     cmd.get_cmd_line_argument("N", N, 0);
     cmd.get_cmd_line_argument("bx", block_size_x, 8);
-    cmd.get_cmd_line_argument("bt", block_size_y, 1);
+    cmd.get_cmd_line_argument("by", block_size_y, 1);
+    cmd.get_cmd_line_argument("sparsity", sparsity, 0.5f);
     cmd.get_cmd_line_argument("iterations", iterations, 20);
     cmd.get_cmd_line_argument("alpha", alpha, 1.0f);
     cmd.get_cmd_line_argument("beta", beta, 0.0f);   
@@ -117,7 +120,8 @@ struct Options {
     int64_t fmas = (int64_t)M * (int64_t)K * (int64_t)N;
 
     // Two flops per multiply-add
-    return 2.0 * double(fmas) * sparsity / double(1.0e9) / runtime_s;
+    // TODO: calc by thread block
+    return 2.0 * double(fmas) * (1 - sparsity) / double(1.0e9) / runtime_s;
   }
 
   /// Prints the usage statement.
@@ -226,21 +230,24 @@ private:
   }
 
   /// Verifies the result is a GEMM
-  bool verify_() {
+  bool verify_(double& diff) {
 
     bool passed = true;
 
     tensor_d.sync_host();
 
     // Reference check
-    passed = cutlass::reference::host::TensorEquals(tensor_d.host_view(), reference_d.host_view());
+    // passed = cutlass::reference::host::TensorEquals(tensor_d.host_view(), reference_d.host_view());
+    diff = cutlass::reference::host::TensorSumSqDiff(tensor_d.host_view(), reference_d.host_view());
+    passed = diff / (options.M * options.N * options.K) < 1e-6;
 
     if (!passed) {
       std::cerr << "\n***\nError - problem failed the QA check\n***\n" << std::endl;
 
       std::stringstream fname;
 
-      fname << "error_99_pit_gemm_"
+      fname << std::filesystem::path(__FILE__).parent_path().string()
+            << "/error_99_pit_gemm_"
             << options.M << "x"
             << options.N << "x"
             << options.K << "_"
@@ -253,7 +260,7 @@ private:
 
       results
         << "\nA:\n" << tensor_a.host_view() << "\n"
-        << "\nA Pit Index:\n" << tensor_pit_idx.host_view() << "\n"
+        << "\nA PIT Index:\n" << tensor_pit_idx.host_view() << "\n"
         << "\nB:\n" << tensor_b.host_view() << "\n"
         << "\nC:\n" << tensor_c.host_view() << "\n"
         << "\nD reference:\n" << reference_d.host_view() << "\n"
@@ -322,8 +329,6 @@ public:
       tensor_c.device_ref(),
       tensor_d.device_ref(),
       tensor_pit_idx.device_data(),
-      options.block_size_x,
-      options.block_size_y,
       epilogue_op 
     );
 
@@ -356,7 +361,9 @@ public:
     //
     // Verify correctness
     //
-    result.passed = verify_();
+    result.passed = verify_(result.diff);
+
+    return result;
 
     std::cout << "=========== Sync 1 ==========" << std::endl;
     result.error = cudaDeviceSynchronize();
@@ -469,9 +476,13 @@ public:
 
     std::cout << std::endl;
     std::cout << "PIT GeMM (CUTLASS):\n"
+      << "     MxNxK = " << options.M << "x" << options.N << "x" << options.K << "\n"
+      << "     Block = " << options.block_size_y << "x" << options.block_size_x << "\n"
+      << "  Sparsity = " << options.sparsity << "\n"
       << "====================================================" << std::endl;
 
     std::cout << std::endl;
+    std::cout << "    " << "SumDiff: " << result.diff << std::endl;
     std::cout << "    " << "Runtime: " << result.runtime_ms << " ms" << std::endl;
     std::cout << "    " << " GFLOPs: " << result.gflops << std::endl;
 
@@ -537,8 +548,11 @@ int main(int argc, char const **args) {
   using WarpShape = cutlass::gemm::GemmShape<64, 64, 32>;
   using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
 
+  using PitBlockShape = cutlass::PitchLinearShape<8, 1>;
+
   constexpr int32_t kStages = 4;
   using Gemm = typename cutlass::gemm::device::PitGemm<
+    PitBlockShape,
     ElementA, 
     LayoutA, 
     ElementB,

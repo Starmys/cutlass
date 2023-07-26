@@ -17,7 +17,7 @@ TRANSPOSE_A = False
 TRANSPOSE_B = True
 BLOCK_H = 1
 BLOCK_W = 8
-SPARSITY = 0.0
+SPARSITY = 0.9
 
 
 def build_index(mask: torch.Tensor, block: tuple[int, int]):
@@ -119,7 +119,7 @@ if __name__ == '__main__':
         'K': SHAPE_K,
         'bx': BLOCK_W,
         'by': BLOCK_H,
-        'sparsity': SPARSITY,
+        'sparsity': (idx == 0).sum() / idx.shape[0] / idx.shape[1],
     }
     cmd += ''.join([f' --{k}={v}' for k, v in args.items()])
     with open(os.path.join(TARGET_PATH, 'cmd.txt'), 'w') as f:

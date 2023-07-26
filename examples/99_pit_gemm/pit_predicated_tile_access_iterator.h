@@ -10,8 +10,6 @@
 #include "cutlass/tensor_ref.h"
 #include "cutlass/tensor_view.h"
 
-#include "pit_index_iterator.h"
-
 ////////////////////////////////////////////////////////////////////////////////
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -24,7 +22,7 @@ namespace threadblock {
 
 /// PitPredicatedTileAccessIterator
 ///
-template <typename Shape, typename Element, typename Layout, int AdvanceRank,
+template <typename PitIndexIterator, typename Shape, typename Element, typename Layout, int AdvanceRank,
           typename ThreadMap, typename AccessType>
 class PitPredicatedTileAccessIterator;
 
@@ -32,9 +30,9 @@ class PitPredicatedTileAccessIterator;
 
 /// Specialization of PitPredicatedTileAccessIterator for pitch-linear data.
 ///
-template <typename Shape_, typename Element_, int AdvanceRank,
+template <typename PitIndexIterator, typename Shape_, typename Element_, int AdvanceRank,
           typename ThreadMap_, typename AccessType_>
-class PitPredicatedTileAccessIterator<Shape_, Element_, layout::PitchLinear,
+class PitPredicatedTileAccessIterator<PitIndexIterator, Shape_, Element_, layout::PitchLinear,
                                    AdvanceRank, ThreadMap_, AccessType_> {
  public:
   static_assert(
@@ -108,21 +106,17 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::PitchLinear,
     /// Construct the Params object given a pitch-linear tensor's layout
     CUTLASS_HOST_DEVICE
     Params(Layout const &layout) : stride_(layout.stride(0)) {
-      inc_strided_ = (LongIndex(stride_) * ThreadMap::Delta::kStrided) *
-                     sizeof_bits<Element>::value / 8;
+      inc_strided_ = (LongIndex(stride_) * ThreadMap::Delta::kStrided);
 
       if (kAdvanceRank) {
         // advance along strided dimension
-        inc_advance_ =
-            Shape::kStrided * LongIndex(stride_) * sizeof_bits<Element>::value / 8;
+        inc_advance_ = Shape::kStrided * LongIndex(stride_);
       } else {
         // advance along contiguous dimension
-        inc_advance_ = Shape::kContiguous * sizeof_bits<Element>::value / 8;
+        inc_advance_ = Shape::kContiguous;
       }
 
-      inc_next_ = inc_advance_ - LongIndex(ThreadMap::Iterations::kStrided - 1) *
-                                     ThreadMap::Delta::kStrided * LongIndex(stride_) *
-                                     sizeof_bits<Element>::value / 8;
+      inc_next_ = inc_advance_ - LongIndex(ThreadMap::Iterations::kStrided - 1) * inc_strided_;
     };
   };
 
@@ -143,7 +137,7 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::PitchLinear,
   int pointer_offset_;
 
   /// PIT Index Iterator
-  pit::IndexIterator pit_index_iterator_;
+  PitIndexIterator pit_index_iterator_;
 
   /// Guard predicates
   uint32_t predicates_[kPredicateWordCount];
@@ -168,6 +162,9 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::PitchLinear,
 
   /// Iteration in the strided dimension
   int iteration_strided_;
+
+  /// Number of iterated tiles
+  int tile_offset_;
 
  public:
   /// Computes predicates based on internally tracked per-thread offset.
@@ -239,11 +236,12 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::PitchLinear,
       int thread_id,
       /// Initial offset of threadblock
       TensorCoord const &threadblock_offset,
-      pit::IndexIterator index_iterator)
+      PitIndexIterator index_iterator)
       : params_(params),
         pointer_(reinterpret_cast<BytePointer>(
             const_cast<NonConstPointer>(pointer))),
         pointer_offset_(0),
+        tile_offset_(0),
         extent_(extent),
         is_residue_tile_(true),
         pit_index_iterator_(index_iterator) {
@@ -286,6 +284,26 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::PitchLinear,
     compute_predicates_(residue_extent, false);
 
     set_iteration_index(0);
+
+    // if (threadIdx.x == 0) {
+    //   std::printf(
+    //     "[bid = (%d, %d, %d)] extent = (%d, %d), tb_offset = (%d, %d)\n",
+    //     int(blockIdx.x), int(blockIdx.y), int(blockIdx.z),
+    //     int(extent_.strided()),
+    //     int(extent_.contiguous()),
+    //     int(threadblock_offset.strided()),
+    //     int(threadblock_offset.contiguous())
+    //   );
+    // }
+    // if (blockIdx.x == 0) {
+    //   TensorCoord thread_offset = ThreadMap::initial_offset(thread_id);
+    //   std::printf(
+    //     "[tid = (%d)] thread_offset = (%d, %d)\n",
+    //     int(threadIdx.x),
+    //     int(thread_offset.strided()),
+    //     int(thread_offset.contiguous())
+    //   );
+    // }
   }
 
   /// Construct a PitPredicatedTileAccessIterator with zero threadblock offset
@@ -299,7 +317,7 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::PitchLinear,
       TensorCoord extent,
       ///< ID of each participating thread
       int thread_id,
-      pit::IndexIterator index_iterator)
+      PitIndexIterator index_iterator)
       : PitPredicatedTileAccessIterator(params, pointer, extent, thread_id,
                                      make_Coord(0, 0), index_iterator) {}
 
@@ -318,7 +336,7 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::PitchLinear,
   /// Adds a pointer offset in units of Element
   CUTLASS_HOST_DEVICE
   void add_pointer_offset(LongIndex pointer_offset) {
-    pointer_offset_ += sizeof_bits<Element>::value * pointer_offset / 8;
+    pointer_offset_ += pointer_offset;
   }
 
   /// Advances an iterator along logical dimensions of matrix in units of whole tiles
@@ -336,42 +354,48 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::PitchLinear,
 
       if (kAdvanceRank) { // K: strided
         pointer_offset_ += params_.inc_advance_ * LongIndex(tile_offset.strided() - 1);
-        pointer_offset_ += Shape::kContiguous * tile_offset.contiguous();
+        pointer_offset_ += Shape::kContiguous * tile_offset.contiguous(); // * 8 / sizeof_bits<Element>::value
       } else {
         pointer_offset_ += params_.inc_advance_ * LongIndex(tile_offset.contiguous() - 1);
-        pointer_offset_ += Shape::kStrided * tile_offset.strided();
+        pointer_offset_ += Shape::kStrided * tile_offset.strided(); // * 8 / sizeof_bits<Element>::value
       }
     } else {
       if (kAdvanceRank) {
         pointer_offset_ += params_.inc_advance_ * LongIndex(tile_offset.strided());
-        pointer_offset_ += Shape::kContiguous * tile_offset.contiguous();
+        pointer_offset_ += Shape::kContiguous * tile_offset.contiguous(); // * 8 / sizeof_bits<Element>::value
       } else {
         pointer_offset_ += params_.inc_advance_ * LongIndex(tile_offset.contiguous());
-        pointer_offset_ += Shape::kStrided * tile_offset.strided();
+        pointer_offset_ += Shape::kStrided * tile_offset.strided(); // * 8 / sizeof_bits<Element>::value
       }
     }
     is_residue_tile_ = false;
+    if (kAdvanceRank) {
+      tile_offset_ += tile_offset.strided();
+    } else {
+      tile_offset_ += tile_offset.contiguous();
+    }
+    pit_index_iterator_.load_indices(tile_offset_);
   }
 
   /// Returns a pointer
   // CUTLASS_HOST_DEVICE
   // AccessType *get() const {
-  //   return reinterpret_cast<AccessType *>(
-  //       pointer_ + 
-  //       iteration_contiguous_ * (ThreadMap::Delta::kContiguous * sizeof_bits<Element>::value) / 8) + iteration_vector_;
+  //   return reinterpret_cast<AccessType *>(pointer_ + (
+  //     pointer_offset_ + iteration_contiguous_ * ThreadMap::Delta::kContiguous + iteration_vector_
+  //   ) * sizeof_bits<Element>::value / 8);
   // }
 
-  /// Returns a pointer
+  /// Returns a pointer of current vector
   CUTLASS_DEVICE
   AccessType *get() {
-    int raw_offset = pointer_offset_ * 8 / sizeof_bits<Element>::value;
-    if (kAdvanceRank) {
-      raw_offset += iteration_strided_ * ThreadMap::Delta::kStrided;
+    int real_offset = pit_index_iterator_.get_real_offset(
+      pointer_offset_ + iteration_contiguous_ * ThreadMap::Delta::kContiguous + iteration_vector_
+    );
+    if (real_offset < 0) {
+      return reinterpret_cast<AccessType *>(pit_index_iterator_.get_zero_pointer());
     } else {
-      raw_offset += iteration_contiguous_ * ThreadMap::Delta::kContiguous + iteration_vector_ * AccessType::kElements;
+      return reinterpret_cast<AccessType *>(pointer_ + real_offset * sizeof_bits<Element>::value / 8);
     }
-    int real_offset = pit_index_iterator_.get_real_offset(raw_offset);
-    return reinterpret_cast<AccessType *>(pointer_ + real_offset * sizeof_bits<Element>::value / 8);
   }
 
   CUTLASS_HOST_DEVICE
@@ -497,9 +521,9 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::PitchLinear,
 ///            WriteableContiguousTileIteratorConcept |
 ///            MaskedTileIteratorConcept
 ///
-template <typename Shape_, typename Element_, int AdvanceRank,
+template <typename PitIndexIterator, typename Shape_, typename Element_, int AdvanceRank,
           typename ThreadMap_, typename AccessType_>
-class PitPredicatedTileAccessIterator<Shape_, Element_, layout::ColumnMajor,
+class PitPredicatedTileAccessIterator<PitIndexIterator, Shape_, Element_, layout::ColumnMajor,
                                    AdvanceRank, ThreadMap_, AccessType_> {
  public:
   static_assert(
@@ -525,6 +549,7 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::ColumnMajor,
   using NonConstPointer = typename platform::remove_const<Element>::type *;
 
   using UnderlyingIterator = PitPredicatedTileAccessIterator<
+      PitIndexIterator,
       layout::PitchLinearShape<Shape::kRow, Shape::kColumn>, Element,
       layout::PitchLinear, (kAdvanceRank == 0 ? 0 : 1), ThreadMap, AccessType>;
 
@@ -576,7 +601,7 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::ColumnMajor,
       int thread_id,
       ///< Initial offset of threadblock
       TensorCoord const &threadblock_offset,
-      pit::IndexIterator index_iterator)
+      PitIndexIterator index_iterator)
       : iterator_(params.params_, pointer,
                   layout::PitchLinearCoord(extent.row(), extent.column()),
                   thread_id,
@@ -591,7 +616,7 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::ColumnMajor,
       Pointer pointer,       ///< Pointer to start of tensor
       TensorCoord extent,    ///< Extent of tensor
       int thread_id,         ///< ID of each participating thread
-      pit::IndexIterator index_iterator)
+      PitIndexIterator index_iterator)
       : PitPredicatedTileAccessIterator(params, pointer, extent, thread_id,
                                      make_Coord(0, 0), index_iterator) {}
 
@@ -680,9 +705,9 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::ColumnMajor,
 ///            WriteableContiguousTileIteratorConcept |
 ///            MaskedTileIteratorConcept
 ///
-template <typename Shape_, typename Element_, int AdvanceRank,
+template <typename PitIndexIterator, typename Shape_, typename Element_, int AdvanceRank,
           typename ThreadMap_, typename AccessType_>
-class PitPredicatedTileAccessIterator<Shape_, Element_, layout::RowMajor,
+class PitPredicatedTileAccessIterator<PitIndexIterator, Shape_, Element_, layout::RowMajor,
                                    AdvanceRank, ThreadMap_, AccessType_> {
  public:
   static_assert(
@@ -708,6 +733,7 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::RowMajor,
   using NonConstPointer = typename platform::remove_const<Element>::type *;
 
   using UnderlyingIterator = PitPredicatedTileAccessIterator<
+      PitIndexIterator,
       layout::PitchLinearShape<Shape::kColumn, Shape::kRow>, Element,
       layout::PitchLinear, (kAdvanceRank == 0 ? 1 : 0), ThreadMap, AccessType>;
 
@@ -759,7 +785,7 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::RowMajor,
       int thread_id,
       ///< Initial offset of threadblock
       TensorCoord const &threadblock_offset,
-      pit::IndexIterator index_iterator)
+      PitIndexIterator index_iterator)
       : iterator_(params.params_, pointer,
                   layout::PitchLinearCoord(extent.column(), extent.row()),
                   thread_id,
@@ -774,7 +800,7 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::RowMajor,
       Pointer pointer,       ///< Pointer to start of tensor
       TensorCoord extent,    ///< Extent of tensor
       int thread_id,         ///< ID of each participating thread
-      pit::IndexIterator index_iterator)
+      PitIndexIterator index_iterator)
       : PitPredicatedTileAccessIterator(params, pointer, extent, thread_id,
                                      make_Coord(0, 0), index_iterator) {}
 
@@ -865,9 +891,9 @@ class PitPredicatedTileAccessIterator<Shape_, Element_, layout::RowMajor,
 ///            MaskedTileIteratorConcept
 ///
 
-template <typename Shape_, typename Element_, int AdvanceRank,
+template <typename PitIndexIterator, typename Shape_, typename Element_, int AdvanceRank,
           typename ThreadMap_, typename AccessType_, int InterleavedK>
-class PitPredicatedTileAccessIterator<Shape_, Element_,
+class PitPredicatedTileAccessIterator<PitIndexIterator, Shape_, Element_,
                                    layout::ColumnMajorInterleaved<InterleavedK>,
                                    AdvanceRank, ThreadMap_, AccessType_> {
  public:
@@ -895,6 +921,7 @@ class PitPredicatedTileAccessIterator<Shape_, Element_,
   using NonConstPointer = typename platform::remove_const<Element>::type *;
 
   using UnderlyingIterator = PitPredicatedTileAccessIterator<
+      PitIndexIterator,
       layout::PitchLinearShape<Shape::kRow * kInterleavedK,
                                Shape::kColumn / kInterleavedK>,
       Element, layout::PitchLinear, (kAdvanceRank == 0 ? 0 : 1), ThreadMap,
@@ -946,7 +973,7 @@ class PitPredicatedTileAccessIterator<Shape_, Element_,
       int thread_id,
       /// Initial offset of threadblock
       TensorCoord const &threadblock_offset,
-      pit::IndexIterator index_iterator)
+      PitIndexIterator index_iterator)
       : iterator_(params.params_, pointer,
                   layout::PitchLinearCoord(extent.row() * kInterleavedK,
                                            extent.column() / kInterleavedK),
@@ -963,7 +990,7 @@ class PitPredicatedTileAccessIterator<Shape_, Element_,
       Pointer pointer,       ///< Pointer to start of tensor
       TensorCoord extent,    ///< Extent of tensor
       int thread_id,         ///< ID of each participating thread
-      pit::IndexIterator index_iterator)
+      PitIndexIterator index_iterator)
       : PitPredicatedTileAccessIterator(params, pointer, extent, thread_id,
                                      make_Coord(0, 0), index_iterator) {}
 
@@ -1051,9 +1078,9 @@ class PitPredicatedTileAccessIterator<Shape_, Element_,
 ///            WriteableContiguousTileIteratorConcept |
 ///            MaskedTileIteratorConcept
 ///
-template <typename Shape_, typename Element_, int AdvanceRank,
+template <typename PitIndexIterator, typename Shape_, typename Element_, int AdvanceRank,
           typename ThreadMap_, typename AccessType_, int InterleavedK>
-class PitPredicatedTileAccessIterator<Shape_, Element_,
+class PitPredicatedTileAccessIterator<PitIndexIterator, Shape_, Element_,
                                    layout::RowMajorInterleaved<InterleavedK>,
                                    AdvanceRank, ThreadMap_, AccessType_> {
  public:
@@ -1081,6 +1108,7 @@ class PitPredicatedTileAccessIterator<Shape_, Element_,
   using NonConstPointer = typename platform::remove_const<Element>::type *;
 
   using UnderlyingIterator = PitPredicatedTileAccessIterator<
+      PitIndexIterator,
       layout::PitchLinearShape<Shape::kColumn * kInterleavedK,
                                Shape::kRow / kInterleavedK>,
       Element, layout::PitchLinear, (kAdvanceRank == 0 ? 1 : 0), ThreadMap,
@@ -1133,7 +1161,7 @@ class PitPredicatedTileAccessIterator<Shape_, Element_,
       int thread_id,
       /// Initial offset of threadblock
       TensorCoord const &threadblock_offset,
-      pit::IndexIterator index_iterator)
+      PitIndexIterator index_iterator)
       : iterator_(params.params_, pointer,
                   layout::PitchLinearCoord(extent.column() * kInterleavedK,
                                            extent.row() / kInterleavedK),
@@ -1150,7 +1178,7 @@ class PitPredicatedTileAccessIterator<Shape_, Element_,
       Pointer pointer,       ///< Pointer to start of tensor
       TensorCoord extent,    ///< Extent of tensor
       int thread_id,         ///< ID of each participating thread
-      pit::IndexIterator index_iterator)
+      PitIndexIterator index_iterator)
       : PitPredicatedTileAccessIterator(params, pointer, extent, thread_id,
                                      make_Coord(0, 0), index_iterator) {}
 

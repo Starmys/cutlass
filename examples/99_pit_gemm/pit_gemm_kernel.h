@@ -18,6 +18,7 @@ namespace kernel {
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
+  typename PitIndexIterator,
   typename Mma_,                  ///! Threadblock-scoped matrix multiply-accumulate
   typename Epilogue_,             ///! Epilogue
   typename ThreadblockSwizzle_,   ///! Threadblock swizzling function
@@ -54,8 +55,6 @@ struct PitGemm {
     int gemm_k_iterations;
     int gemm_k_size;
     const int* pit_idx;
-    int pit_blocksize_x;
-    int pit_blocksize_y;
 
     //
     // Methods
@@ -73,8 +72,6 @@ struct PitGemm {
       typename Epilogue::OutputTileIterator::TensorRef ref_C,
       typename Epilogue::OutputTileIterator::TensorRef ref_D,
       const int* pit_idx,
-      int pit_blocksize_x,
-      int pit_blocksize_y,
       typename OutputOp::Params output_op = typename OutputOp::Params(),
       int *workspace = nullptr
     ):
@@ -90,9 +87,7 @@ struct PitGemm {
       params_D(ref_D.layout()),
       ref_D(ref_D),
       output_op(output_op),
-      pit_idx(pit_idx),
-      pit_blocksize_x(pit_blocksize_x),
-      pit_blocksize_y(pit_blocksize_y)
+      pit_idx(pit_idx)
     {
 
       int total_gemm_k_iterations = (problem_size.k() + Mma::Shape::kK - 1) / Mma::Shape::kK;
@@ -210,16 +205,13 @@ struct PitGemm {
       threadblock_tile_offset.n() * Mma::Shape::kN
     };
 
-    typename cutlass::transform::threadblock::pit::IndexIterator pit_index_iterator(
+    PitIndexIterator pit_index_iterator(
       shared_storage.pit,
       &(params.pit_idx[0]),
-      params.problem_size.k(),
-      params.pit_blocksize_x,
-      params.pit_blocksize_y,
-      Mma::Shape::kK, // TODO: check
-      Mma::Shape::kM, // TODO: check
-      blockIdx.y,
-      blockIdx.x
+      reinterpret_cast<char *>(const_cast<int *>(&(params.pit_idx[1000]))), // zero_ptr,
+      {params.problem_size.k(), params.problem_size.m()},
+      tb_offset_A,
+      thread_idx
     );
 
     // TODO: Compute threadblock-scoped matrix multiply-add
@@ -357,12 +349,13 @@ struct PitGemm {
 
 // B is Sparse
 template <
+  typename PitIndexIterator,
   typename Mma_,                  ///! Threadblock-scoped matrix multiply-accumulate
   typename Epilogue_,             ///! Epilogue
   typename ThreadblockSwizzle_,   ///! Threadblock swizzling function
   bool SplitKSerial               ///! If true, code supporting split-K via serial reduction is enabled.
 >
-struct PitGemm<Mma_, Epilogue_, ThreadblockSwizzle_, SplitKSerial, false> {
+struct PitGemm<PitIndexIterator, Mma_, Epilogue_, ThreadblockSwizzle_, SplitKSerial, false> {
 
   using Mma = Mma_;
   using Epilogue = Epilogue_;
@@ -392,8 +385,6 @@ struct PitGemm<Mma_, Epilogue_, ThreadblockSwizzle_, SplitKSerial, false> {
     int gemm_k_iterations;
     int gemm_k_size;
     const int* pit_idx;
-    int pit_blocksize_x;
-    int pit_blocksize_y;
 
     //
     // Methods
@@ -411,8 +402,6 @@ struct PitGemm<Mma_, Epilogue_, ThreadblockSwizzle_, SplitKSerial, false> {
       typename Epilogue::OutputTileIterator::TensorRef ref_C,
       typename Epilogue::OutputTileIterator::TensorRef ref_D,
       const int* pit_idx,
-      int pit_blocksize_x,
-      int pit_blocksize_y,
       typename OutputOp::Params output_op = typename OutputOp::Params(),
       int *workspace = nullptr
     ):
@@ -428,9 +417,7 @@ struct PitGemm<Mma_, Epilogue_, ThreadblockSwizzle_, SplitKSerial, false> {
       params_D(ref_D.layout()),
       ref_D(ref_D),
       output_op(output_op),
-      pit_idx(pit_idx),
-      pit_blocksize_x(pit_blocksize_x),
-      pit_blocksize_y(pit_blocksize_y)
+      pit_idx(pit_idx)
     {
 
       int total_gemm_k_iterations = (problem_size.k() + Mma::Shape::kK - 1) / Mma::Shape::kK;
@@ -548,16 +535,13 @@ struct PitGemm<Mma_, Epilogue_, ThreadblockSwizzle_, SplitKSerial, false> {
       threadblock_tile_offset.n() * Mma::Shape::kN,
     };
 
-    typename cutlass::transform::threadblock::pit::IndexIterator pit_index_iterator(
+    PitIndexIterator pit_index_iterator(
       shared_storage.pit,
       &(params.pit_idx[0]),
-      params.problem_size.k(),
-      params.pit_blocksize_x,
-      params.pit_blocksize_y,
-      Mma::Shape::kK, // TODO: check
-      Mma::Shape::kN, // TODO: check
-      blockIdx.x,
-      blockIdx.y
+      reinterpret_cast<char *>(const_cast<int *>(&(params.pit_idx[1000]))), // zero_ptr,
+      {params.problem_size.n(), params.problem_size.k()},
+      tb_offset_B,
+      thread_idx
     );
 
     // TODO: Compute threadblock-scoped matrix multiply-add
