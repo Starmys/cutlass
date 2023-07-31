@@ -64,7 +64,7 @@ template <
     /// Tag indicating architecture to tune for
     typename ArchTag,
     /// PIT Block Shape
-    typename PitBlockShape,
+    int PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
@@ -108,7 +108,7 @@ template <
     /// Element type for internal accumulation
     typename ElementAccumulator,
     /// PIT Block Shape
-    typename PitBlockShape,
+    int PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
@@ -180,7 +180,7 @@ template <
   /// Element type for internal accumulation
   typename ElementAccumulator,
   /// PIT Block Shape
-  typename PitBlockShape,
+  int PitBlockShape,
   /// Threadblock-level tile size (concept: GemmShape)
   typename ThreadblockShape,
   /// Warp-level tile size (concept: GemmShape)
@@ -272,7 +272,7 @@ template <
     /// Element type for C and D matrix operands
     typename ElementC,
     /// PIT Block Shape
-    typename PitBlockShape,
+    int PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
@@ -348,7 +348,7 @@ template <
     /// Element type for C and D matrix operands
     typename ElementC,
     /// PIT Block Shape
-    typename PitBlockShape,
+    int PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
@@ -428,7 +428,7 @@ template <
   /// Element type for internal accumulation
   typename ElementAccumulator,
   /// PIT Block Shape
-  typename PitBlockShape,
+  int PitBlockShape,
   /// Threadblock-level tile size (concept: GemmShape)
   typename ThreadblockShape,
   /// Warp-level tile size (concept: GemmShape)
@@ -526,7 +526,7 @@ template <
     /// Tag indicating architecture to tune for
     typename ArchTag,
     /// PIT Block Shape
-    typename PitBlockShape,
+    int PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
@@ -625,7 +625,7 @@ template <
     /// Element type for internal accumulation
     typename ElementAccumulator,
     /// PIT Block Shape
-    typename PitBlockShape,
+    int PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
@@ -714,7 +714,7 @@ template <
     /// Element type for internal accumulation
     typename ElementAccumulator,
     /// PIT Block Shape
-    typename PitBlockShape,
+    int PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)
@@ -808,7 +808,7 @@ template <
     /// Tag indicating architecture to tune for
     typename ArchTag,
     /// PIT Block Shape
-    typename PitBlockShape,
+    int PitBlockShape,
     /// Threadblock-level tile size (concept: GemmShape)
     typename ThreadblockShape,
     /// Warp-level tile size (concept: GemmShape)

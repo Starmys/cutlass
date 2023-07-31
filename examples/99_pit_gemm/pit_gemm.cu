@@ -68,8 +68,7 @@ struct Options {
   bool help;
   int mode; // SDD == 0, DSD == 1 
   int M, K, N;
-  int block_size_x;
-  int block_size_y;
+  int block_size;
   float sparsity;
   int iterations;
   float alpha;
@@ -85,8 +84,7 @@ struct Options {
     M(1024),
     K(1024),
     N(1024),
-    block_size_x(8),
-    block_size_y(1),
+    block_size(1),
     sparsity(0.5f),
     iterations(20),
     alpha(1.0f),
@@ -105,8 +103,7 @@ struct Options {
     cmd.get_cmd_line_argument("M", M, 0);
     cmd.get_cmd_line_argument("K", K, 0);
     cmd.get_cmd_line_argument("N", N, 0);
-    cmd.get_cmd_line_argument("bx", block_size_x, 8);
-    cmd.get_cmd_line_argument("by", block_size_y, 1);
+    cmd.get_cmd_line_argument("block", block_size, 8);
     cmd.get_cmd_line_argument("sparsity", sparsity, 0.5f);
     cmd.get_cmd_line_argument("iterations", iterations, 20);
     cmd.get_cmd_line_argument("alpha", alpha, 1.0f);
@@ -135,8 +132,7 @@ struct Options {
       << "  --M=<int>                   Sets the M dimension.\n"
       << "  --N=<int>                   Sets the N dimension.\n"
       << "  --K=<int>                   Sets the K dimension.\n"
-      << "  --bx=<int>                  Sets the PIT block size x.\n"
-      << "  --by=<int>                  Sets the PIT block size y.\n"
+      << "  --block=<int>               Sets the PIT block size.\n"
       << "  --sparsity=<f32>            Sets the sparse ratio.\n"
       << "  --alpha=<f32>               Epilogue scalar alpha (real part)\n"
       << "  --beta=<f32>                Epilogue scalar beta (real part)\n\n"
@@ -144,8 +140,8 @@ struct Options {
 
     out << "\n\nExamples:\n\n"
 
-      << "# Runs a 1024x1024x1024 PIT GEMM with 8x1 block size and sparse ratio of 0.5\n"
-      << "$ ./examples/99_pit_gemm/99_pit_gemm --M=1024 --N=1024 --K=1024 --bx=8 --by=1 --sparsity=0.5\n\n";
+      << "# Runs a 1024x1024x1024 PIT GEMM with block size 8 and sparse ratio of 0.5\n"
+      << "$ ./examples/99_pit_gemm/99_pit_gemm --M=1024 --N=1024 --K=1024 --block=8 --sparsity=0.5\n\n";
 
     return out;
   }
@@ -208,8 +204,8 @@ private:
 
     reference_d.resize(cutlass::make_Coord(options.M, options.N));
 
-    tensor_pit_idx.resize(cutlass::make_Coord(options.M / options.block_size_y,
-                                              options.K / options.block_size_x));
+    tensor_pit_idx.resize(cutlass::make_Coord(options.M / Gemm::ThreadblockShape::kM,
+                                              options.K / options.block_size));
 
     std::string data_folder = "examples/99_pit_gemm/data/";
     load_array_from_file<float, cutlass::half_t>(tensor_a.host_ref().data(), data_folder + "A.txt");
@@ -251,8 +247,7 @@ private:
             << options.M << "x"
             << options.N << "x"
             << options.K << "_"
-            << options.block_size_y << "x"
-            << options.block_size_x << ".txt";
+            << options.block_size << ".txt";
 
       std::cout << fname.str() << std::endl;
 
@@ -363,6 +358,7 @@ public:
     //
     result.passed = verify_(result.diff);
 
+    std::cout << "SumDiff: " << result.diff << std::endl;
     return result;
 
     std::cout << "=========== Sync 1 ==========" << std::endl;
@@ -477,7 +473,7 @@ public:
     std::cout << std::endl;
     std::cout << "PIT GeMM (CUTLASS):\n"
       << "     MxNxK = " << options.M << "x" << options.N << "x" << options.K << "\n"
-      << "     Block = " << options.block_size_y << "x" << options.block_size_x << "\n"
+      << "  Block(K) = " << options.block_size << "\n"
       << "  Sparsity = " << options.sparsity << "\n"
       << "====================================================" << std::endl;
 
@@ -548,7 +544,7 @@ int main(int argc, char const **args) {
   using WarpShape = cutlass::gemm::GemmShape<64, 64, 32>;
   using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
 
-  using PitBlockShape = cutlass::PitchLinearShape<8, 1>;
+  constexpr int32_t PitBlockShape = 8;
 
   constexpr int32_t kStages = 4;
   using Gemm = typename cutlass::gemm::device::PitGemm<

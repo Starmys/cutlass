@@ -208,7 +208,6 @@ struct PitGemm {
     PitIndexIterator pit_index_iterator(
       shared_storage.pit,
       &(params.pit_idx[0]),
-      reinterpret_cast<char *>(const_cast<int *>(&(params.pit_idx[1000]))), // zero_ptr,
       {params.problem_size.k(), params.problem_size.m()},
       tb_offset_A,
       thread_idx
@@ -538,7 +537,6 @@ struct PitGemm<PitIndexIterator, Mma_, Epilogue_, ThreadblockSwizzle_, SplitKSer
     PitIndexIterator pit_index_iterator(
       shared_storage.pit,
       &(params.pit_idx[0]),
-      reinterpret_cast<char *>(const_cast<int *>(&(params.pit_idx[1000]))), // zero_ptr,
       {params.problem_size.n(), params.problem_size.k()},
       tb_offset_B,
       thread_idx

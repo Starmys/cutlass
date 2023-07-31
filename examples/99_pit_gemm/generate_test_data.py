@@ -15,7 +15,7 @@ SHAPE_N = 512
 SPARSE_PORT = 'A'
 TRANSPOSE_A = False
 TRANSPOSE_B = True
-BLOCK_H = 1
+BLOCK_H = 128
 BLOCK_W = 8
 SPARSITY = 0.9
 
@@ -28,10 +28,11 @@ def build_index(mask: torch.Tensor, block: tuple[int, int]):
     index = []
     arange = torch.arange(mask.shape[-1], dtype=torch.int32, device=mask.device)
     for row in mask:
-        cols = arange[row] + 1
-        cols = cols[torch.randperm(cols.shape[0])]
-        pad = torch.zeros(mask.shape[-1] - cols.shape[0], dtype=torch.int32, device=mask.device)
-        cols = torch.concat([cols, pad])
+        ones = arange[row]
+        ones = ones[torch.randperm(ones.shape[0])]
+        zeros = arange[~row]
+        zeros = zeros[torch.randperm(zeros.shape[0])]
+        cols = torch.concat([ones, zeros])
         index.append(cols.unsqueeze(0))
     return torch.concat(index)
 
@@ -39,8 +40,8 @@ def build_index(mask: torch.Tensor, block: tuple[int, int]):
 def generate_sdd_data(shape: tuple[int, int, int], sparsity: float):
     M, K, N = shape
     mask = torch.rand(size=(M, K), requires_grad=False, device='cuda') > sparsity
-    A = torch.ones(size=(M, K), dtype=torch.float16, requires_grad=False, device='cuda') * mask
-    B = torch.ones(size=(K, N), dtype=torch.float16, requires_grad=False, device='cuda')
+    A = torch.randn(size=(M, K), dtype=torch.float16, requires_grad=False, device='cuda') * mask
+    B = torch.randn(size=(K, N), dtype=torch.float16, requires_grad=False, device='cuda')
     C = torch.matmul(A, B)
     return A, B, C, mask
 

@@ -19,7 +19,7 @@ namespace device {
 
 template <
     /// PIT Block Shape
-    typename PITBlockShape_,
+    int PITBlockShape_,
     /// Element type for A matrix operand
     typename ElementA_,
     /// Layout type for A matrix operand
@@ -94,7 +94,7 @@ class PitGemm {
   using ElementAccumulator = ElementAccumulator_;
   using OperatorClass = OperatorClass_;
   using ArchTag = ArchTag_;
-  using PITBlockShape = PITBlockShape_;
+  static int const PITBlockShape = PITBlockShape_;
   using ThreadblockShape = ThreadblockShape_;
   using WarpShape = WarpShape_;
   using InstructionShape = InstructionShape_;
@@ -365,7 +365,7 @@ public:
 /// Partial specialization for column-major output exchanges problem size and operand.
 template <
     /// PIT Block Shape
-    typename PITBlockShape_,
+    int PITBlockShape_,
     /// Element type for A matrix operand
     typename ElementA_,
     /// Layout type for A matrix operand
@@ -425,7 +425,7 @@ class PitGemm<PITBlockShape_, ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC
   using ElementAccumulator = ElementAccumulator_;
   using OperatorClass = OperatorClass_;
   using ArchTag = ArchTag_;
-  using PITBlockShape = PITBlockShape_;
+  static int const PITBlockShape = PITBlockShape_;
   using ThreadblockShape = ThreadblockShape_;
   using WarpShape = WarpShape_;
   using InstructionShape = InstructionShape_;

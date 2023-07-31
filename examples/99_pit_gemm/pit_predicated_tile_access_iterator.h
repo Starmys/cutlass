@@ -388,14 +388,31 @@ class PitPredicatedTileAccessIterator<PitIndexIterator, Shape_, Element_, layout
   /// Returns a pointer of current vector
   CUTLASS_DEVICE
   AccessType *get() {
-    int real_offset = pit_index_iterator_.get_real_offset(
-      pointer_offset_ + iteration_contiguous_ * ThreadMap::Delta::kContiguous + iteration_vector_
-    );
-    if (real_offset < 0) {
-      return reinterpret_cast<AccessType *>(pit_index_iterator_.get_zero_pointer());
+    int offset = pointer_offset_ + iteration_contiguous_ * ThreadMap::Delta::kContiguous + iteration_vector_;
+    if (kAdvanceRank) {
+      offset += pit_index_iterator_.get_advance_offset(offset / extent_.contiguous()) * extent_.contiguous();
     } else {
-      return reinterpret_cast<AccessType *>(pointer_ + real_offset * sizeof_bits<Element>::value / 8);
+      offset += pit_index_iterator_.get_advance_offset(offset % extent_.contiguous());
     }
+    return reinterpret_cast<AccessType *>(pointer_ + offset * sizeof_bits<Element>::value / 8);
+    // cutlass::half_t* ptr = reinterpret_cast<cutlass::half_t *>(pointer_ + offset * sizeof_bits<Element>::value / 8);
+    // std::printf(
+    //   "[bid = %d, tid = %d] y = %d, x = %d -> %d: [%d, %d, %d, %d, %d, %d, %d, %d]\n",
+    //   int(blockIdx.x),
+    //   int(threadIdx.x),
+    //   int(offset / extent_.contiguous()),
+    //   int(offset % extent_.contiguous() - advance_offset),
+    //   int(offset % extent_.contiguous()),
+    //   int(ptr[0]),
+    //   int(ptr[1]),
+    //   int(ptr[2]),
+    //   int(ptr[3]),
+    //   int(ptr[4]),
+    //   int(ptr[5]),
+    //   int(ptr[6]),
+    //   int(ptr[7])
+    // );
+    // return reinterpret_cast<AccessType *>(ptr);
   }
 
   CUTLASS_HOST_DEVICE
