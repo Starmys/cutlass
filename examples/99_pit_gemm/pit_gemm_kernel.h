@@ -54,7 +54,8 @@ struct PitGemm {
     int *semaphore;
     int gemm_k_iterations;
     int gemm_k_size;
-    const int* pit_idx;
+    const int16_t* pit_num;
+    const int16_t* pit_idx;
 
     //
     // Methods
@@ -71,7 +72,8 @@ struct PitGemm {
       typename Mma::IteratorB::TensorRef ref_B,
       typename Epilogue::OutputTileIterator::TensorRef ref_C,
       typename Epilogue::OutputTileIterator::TensorRef ref_D,
-      const int* pit_idx,
+      const int16_t* pit_num,
+      const int16_t* pit_idx,
       typename OutputOp::Params output_op = typename OutputOp::Params(),
       int *workspace = nullptr
     ):
@@ -87,6 +89,7 @@ struct PitGemm {
       params_D(ref_D.layout()),
       ref_D(ref_D),
       output_op(output_op),
+      pit_num(pit_num),
       pit_idx(pit_idx)
     {
 
@@ -208,13 +211,14 @@ struct PitGemm {
     PitIndexIterator pit_index_iterator(
       shared_storage.pit,
       &(params.pit_idx[0]),
-      {params.problem_size.k(), params.problem_size.m()},
-      tb_offset_A,
+      params.problem_size.k(),
+      threadblock_tile_offset.m(),
       thread_idx
     );
 
-    // TODO: Compute threadblock-scoped matrix multiply-add
-    int gemm_k_iterations = (params.problem_size.k() - tb_offset_A.column() + Mma::Shape::kK - 1) / Mma::Shape::kK;
+    // Compute threadblock-scoped matrix multiply-add
+    // int gemm_k_iterations = (params.problem_size.k() - tb_offset_A.column() + Mma::Shape::kK - 1) / Mma::Shape::kK;
+    int gemm_k_iterations = (params.pit_num[threadblock_tile_offset.m()] + Mma::Shape::kK - 1) / Mma::Shape::kK;
 
     // Construct iterators to A and B operands
     typename Mma::IteratorA iterator_A(
@@ -383,7 +387,8 @@ struct PitGemm<PitIndexIterator, Mma_, Epilogue_, ThreadblockSwizzle_, SplitKSer
     int *semaphore;
     int gemm_k_iterations;
     int gemm_k_size;
-    const int* pit_idx;
+    const int16_t* pit_num;
+    const int16_t* pit_idx;
 
     //
     // Methods
@@ -400,7 +405,8 @@ struct PitGemm<PitIndexIterator, Mma_, Epilogue_, ThreadblockSwizzle_, SplitKSer
       typename Mma::IteratorB::TensorRef ref_B,
       typename Epilogue::OutputTileIterator::TensorRef ref_C,
       typename Epilogue::OutputTileIterator::TensorRef ref_D,
-      const int* pit_idx,
+      const int16_t* pit_num,
+      const int16_t* pit_idx,
       typename OutputOp::Params output_op = typename OutputOp::Params(),
       int *workspace = nullptr
     ):
@@ -416,6 +422,7 @@ struct PitGemm<PitIndexIterator, Mma_, Epilogue_, ThreadblockSwizzle_, SplitKSer
       params_D(ref_D.layout()),
       ref_D(ref_D),
       output_op(output_op),
+      pit_num(pit_num),
       pit_idx(pit_idx)
     {
 
@@ -537,13 +544,14 @@ struct PitGemm<PitIndexIterator, Mma_, Epilogue_, ThreadblockSwizzle_, SplitKSer
     PitIndexIterator pit_index_iterator(
       shared_storage.pit,
       &(params.pit_idx[0]),
-      {params.problem_size.n(), params.problem_size.k()},
-      tb_offset_B,
+      params.problem_size.k(),
+      threadblock_tile_offset.n(),
       thread_idx
     );
 
-    // TODO: Compute threadblock-scoped matrix multiply-add
-    int gemm_k_iterations = (params.problem_size.k() - tb_offset_A.column() + Mma::Shape::kK - 1) / Mma::Shape::kK;
+    // Compute threadblock-scoped matrix multiply-add
+    // int gemm_k_iterations = (params.problem_size.k() - tb_offset_A.column() + Mma::Shape::kK - 1) / Mma::Shape::kK;
+    int gemm_k_iterations = (params.pit_num[threadblock_tile_offset.n()] + Mma::Shape::kK - 1) / Mma::Shape::kK;
 
     // Construct iterators to A and B operands
     typename Mma::IteratorA iterator_A(

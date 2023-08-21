@@ -69,14 +69,14 @@ template <
     int AlignmentB =
         DefaultGemmConfiguration<OperatorClass_, ArchTag_, ElementA_, ElementB_,
                                  ElementC_, ElementAccumulator_>::kAlignmentB,
+    /// Sparse matrix is A or not
+    bool IsASparse = true,
     /// If true, kernel supports split-K with serial reduction
     bool SplitKSerial = false,
     /// Operation performed by GEMM
     typename Operator_ = typename DefaultGemmConfiguration<
         OperatorClass_, ArchTag_, ElementA_, ElementB_, ElementC_,
-        ElementAccumulator_>::Operator,
-    /// Sparse matrix is A or not
-    bool IsASparse = true
+        ElementAccumulator_>::Operator
     >
 class PitGemm {
  public:
@@ -147,7 +147,8 @@ class PitGemm {
     TensorRef<ElementB const, LayoutB> ref_B;
     TensorRef<ElementC const, LayoutC> ref_C;
     TensorRef<ElementC, LayoutC> ref_D;
-    const int* pit_idx;
+    const int16_t* pit_num;
+    const int16_t* pit_idx;
     typename EpilogueOutputOp::Params epilogue;
     int split_k_slices;
 
@@ -169,7 +170,8 @@ class PitGemm {
       TensorRef<ElementB const, LayoutB> ref_B_,
       TensorRef<ElementC const, LayoutC> ref_C_,
       TensorRef<ElementC, LayoutC> ref_D_,
-      const int* pit_idx_,
+      const int16_t* pit_num_,
+      const int16_t* pit_idx_,
       typename EpilogueOutputOp::Params epilogue_ = 
         typename EpilogueOutputOp::Params(),
       int split_k_slices = 1
@@ -179,6 +181,7 @@ class PitGemm {
       ref_B(ref_B_),
       ref_C(ref_C_),
       ref_D(ref_D_),
+      pit_num(pit_num_),
       pit_idx(pit_idx_),
       epilogue(epilogue_),
       split_k_slices(split_k_slices) {
@@ -248,6 +251,7 @@ public:
       args.ref_B.non_const_ref(),
       args.ref_C.non_const_ref(),
       args.ref_D,
+      args.pit_num,
       args.pit_idx,
       args.epilogue,
       static_cast<int *>(workspace)
@@ -398,18 +402,18 @@ template <
     int AlignmentA,
     /// Access granularity of B matrix in units of elements
     int AlignmentB,
+    /// Sparse matrix is A or not
+    bool IsASparse,
     /// If true, kernel supports split-K as a serial reduction
     bool SplitKSerial,
     /// Operation performed by GEMM
-    typename Operator_,
-    /// Sparse matrix is A or not
-    bool IsASparse>
+    typename Operator_>
 class PitGemm<PITBlockShape_, ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC_,
            layout::ColumnMajor,  // partially specialized on LayoutC
            ElementAccumulator_, OperatorClass_, ArchTag_, ThreadblockShape_,
            WarpShape_, InstructionShape_, EpilogueOutputOp_,
            ThreadblockSwizzle_, Stages, AlignmentA, AlignmentB,
-           SplitKSerial, Operator_, IsASparse> {
+           IsASparse, SplitKSerial, Operator_> {
  public:
 
   using ElementA = ElementA_;
@@ -459,9 +463,9 @@ class PitGemm<PITBlockShape_, ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC
     Stages,
     kAlignmentB,
     kAlignmentA,
+    kIsASparse,
     SplitKSerial,
-    Operator,
-    kIsASparse
+    Operator
   >;
 
   using UnderlyingArguments = typename UnderlyingOperator::Arguments;
@@ -480,7 +484,8 @@ class PitGemm<PITBlockShape_, ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC
     TensorRef<ElementB const, LayoutB> ref_B;
     TensorRef<ElementC const, LayoutC> ref_C;
     TensorRef<ElementC, LayoutC> ref_D;
-    const int* pit_idx;
+    const int16_t* pit_num;
+    const int16_t* pit_idx;
     typename EpilogueOutputOp::Params epilogue;
     int split_k_slices;
 
@@ -500,7 +505,8 @@ class PitGemm<PITBlockShape_, ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC
       TensorRef<ElementB const, LayoutB> ref_B_,
       TensorRef<ElementC const, LayoutC> ref_C_,
       TensorRef<ElementC, LayoutC> ref_D_,
-      const int* pit_idx_,
+      const int16_t* pit_num_,
+      const int16_t* pit_idx_,
       typename EpilogueOutputOp::Params epilogue_ = 
         typename EpilogueOutputOp::Params(),
       int split_k_slices = 1
@@ -510,6 +516,7 @@ class PitGemm<PITBlockShape_, ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC
       ref_B(ref_B_),
       ref_C(ref_C_),
       ref_D(ref_D_),
+      pit_num(pit_num_),
       pit_idx(pit_idx_),
       epilogue(epilogue_),
       split_k_slices(split_k_slices) { }
@@ -532,6 +539,7 @@ public:
       {args.ref_A.data(), args.ref_A.stride(0)},
       {args.ref_C.data(), args.ref_C.stride(0)},
       {args.ref_D.data(), args.ref_D.stride(0)},
+      args.pit_num,
       args.pit_idx,
       args.epilogue,
       args.split_k_slices

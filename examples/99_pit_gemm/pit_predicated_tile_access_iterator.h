@@ -284,26 +284,6 @@ class PitPredicatedTileAccessIterator<PitIndexIterator, Shape_, Element_, layout
     compute_predicates_(residue_extent, false);
 
     set_iteration_index(0);
-
-    // if (threadIdx.x == 0) {
-    //   std::printf(
-    //     "[bid = (%d, %d, %d)] extent = (%d, %d), tb_offset = (%d, %d)\n",
-    //     int(blockIdx.x), int(blockIdx.y), int(blockIdx.z),
-    //     int(extent_.strided()),
-    //     int(extent_.contiguous()),
-    //     int(threadblock_offset.strided()),
-    //     int(threadblock_offset.contiguous())
-    //   );
-    // }
-    // if (blockIdx.x == 0) {
-    //   TensorCoord thread_offset = ThreadMap::initial_offset(thread_id);
-    //   std::printf(
-    //     "[tid = (%d)] thread_offset = (%d, %d)\n",
-    //     int(threadIdx.x),
-    //     int(thread_offset.strided()),
-    //     int(thread_offset.contiguous())
-    //   );
-    // }
   }
 
   /// Construct a PitPredicatedTileAccessIterator with zero threadblock offset
@@ -377,6 +357,17 @@ class PitPredicatedTileAccessIterator<PitIndexIterator, Shape_, Element_, layout
     pit_index_iterator_.load_indices(tile_offset_);
   }
 
+/*
+(4096)           dense_iterator + large_k: 0.52221 ms
+(4096) pit_index_iterator[gmem] + large_k: 0.68605 ms
+(2048)           dense_iterator + large_k: 0.08555 ms
+(2048)           dense_iterator + small_k: 0.06558 ms
+(2048) pit_index_iterator[gmem] + large_k: 0.13204 ms
+(2048) pit_index_iterator[gmem] + small_k: 0.09216 ms
+(2048) pit_index_iterator[gmem] + large_k: 0.11166 ms (>> 11)
+(2048) pit_index_iterator[gmem] + small_k: 0.08340 ms (>> 11)
+*/
+
   /// Returns a pointer
   // CUTLASS_HOST_DEVICE
   // AccessType *get() const {
@@ -389,30 +380,9 @@ class PitPredicatedTileAccessIterator<PitIndexIterator, Shape_, Element_, layout
   CUTLASS_DEVICE
   AccessType *get() {
     int offset = pointer_offset_ + iteration_contiguous_ * ThreadMap::Delta::kContiguous + iteration_vector_;
-    if (kAdvanceRank) {
-      offset += pit_index_iterator_.get_advance_offset(offset / extent_.contiguous()) * extent_.contiguous();
-    } else {
-      offset += pit_index_iterator_.get_advance_offset(offset % extent_.contiguous());
-    }
+    // offset += pit_index_iterator_.get_advance_offset(offset / extent_.contiguous()) * extent_.contiguous();
+    offset += pit_index_iterator_.get_advance_offset(offset >> 12) << 12;
     return reinterpret_cast<AccessType *>(pointer_ + offset * sizeof_bits<Element>::value / 8);
-    // cutlass::half_t* ptr = reinterpret_cast<cutlass::half_t *>(pointer_ + offset * sizeof_bits<Element>::value / 8);
-    // std::printf(
-    //   "[bid = %d, tid = %d] y = %d, x = %d -> %d: [%d, %d, %d, %d, %d, %d, %d, %d]\n",
-    //   int(blockIdx.x),
-    //   int(threadIdx.x),
-    //   int(offset / extent_.contiguous()),
-    //   int(offset % extent_.contiguous() - advance_offset),
-    //   int(offset % extent_.contiguous()),
-    //   int(ptr[0]),
-    //   int(ptr[1]),
-    //   int(ptr[2]),
-    //   int(ptr[3]),
-    //   int(ptr[4]),
-    //   int(ptr[5]),
-    //   int(ptr[6]),
-    //   int(ptr[7])
-    // );
-    // return reinterpret_cast<AccessType *>(ptr);
   }
 
   CUTLASS_HOST_DEVICE

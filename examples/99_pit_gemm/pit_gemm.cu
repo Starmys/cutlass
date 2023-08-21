@@ -186,7 +186,8 @@ private:
 
   cutlass::HostTensor<ElementC, LayoutC> reference_d;
 
-  cutlass::HostTensor<int32_t, LayoutA> tensor_pit_idx;
+  cutlass::HostTensor<int16_t, LayoutA> tensor_pit_num;
+  cutlass::HostTensor<int16_t, LayoutA> tensor_pit_idx;
 
 public:
 
@@ -204,24 +205,28 @@ private:
 
     reference_d.resize(cutlass::make_Coord(options.M, options.N));
 
-    tensor_pit_idx.resize(cutlass::make_Coord(options.M / Gemm::ThreadblockShape::kM,
-                                              options.K / options.block_size));
+    tensor_pit_num.resize(cutlass::make_Coord(1, options.M / Gemm::ThreadblockShape::kM));
+    if (options.mode == 0) {
+      tensor_pit_idx.resize(cutlass::make_Coord(options.M / Gemm::ThreadblockShape::kM,
+                                                options.K / options.block_size));
+    } else {
+      tensor_pit_idx.resize(cutlass::make_Coord(options.N / Gemm::ThreadblockShape::kN,
+                                                options.K / options.block_size));
+    }
 
     std::string data_folder = "examples/99_pit_gemm/data/";
     load_array_from_file<float, cutlass::half_t>(tensor_a.host_ref().data(), data_folder + "A.txt");
     load_array_from_file<float, cutlass::half_t>(tensor_b.host_ref().data(), data_folder + "B.txt");
     // load_array_from_file<float, cutlass::half_t>(tensor_c.host_ref().data(), data_folder + "C.txt");
     load_array_from_file<float, cutlass::half_t>(reference_d.host_ref().data(), data_folder + "C.txt");
-    load_array_from_file<int, int>(tensor_pit_idx.host_ref().data(), data_folder + "idx.txt");
-    // std::cout << int(tensor_pit_idx.host_ref().data()[0]) << " "
-    //           << int(tensor_pit_idx.host_ref().data()[1]) << " "
-    //           << int(tensor_pit_idx.host_ref().data()[2]) << " "
-    //           << int(tensor_pit_idx.host_ref().data()[3]) << std::endl;
+    load_array_from_file<int, int16_t>(tensor_pit_num.host_ref().data(), data_folder + "nums.txt");
+    load_array_from_file<int, int16_t>(tensor_pit_idx.host_ref().data(), data_folder + "idx.txt");
 
     tensor_a.sync_device();
     tensor_b.sync_device();
     tensor_c.sync_device();
     tensor_d.sync_device();
+    tensor_pit_num.sync_device();
     tensor_pit_idx.sync_device();
   }
 
@@ -235,7 +240,7 @@ private:
     // Reference check
     // passed = cutlass::reference::host::TensorEquals(tensor_d.host_view(), reference_d.host_view());
     diff = cutlass::reference::host::TensorSumSqDiff(tensor_d.host_view(), reference_d.host_view());
-    passed = diff / (options.M * options.N * options.K) < 1e-6;
+    passed = diff / options.M / options.N / options.K < 1e-6;
 
     if (!passed) {
       std::cerr << "\n***\nError - problem failed the QA check\n***\n" << std::endl;
@@ -255,6 +260,7 @@ private:
 
       results
         << "\nA:\n" << tensor_a.host_view() << "\n"
+        << "\nA PIT BLock Numbers:\n" << tensor_pit_num.host_view() << "\n"
         << "\nA PIT Index:\n" << tensor_pit_idx.host_view() << "\n"
         << "\nB:\n" << tensor_b.host_view() << "\n"
         << "\nC:\n" << tensor_c.host_view() << "\n"
@@ -323,6 +329,7 @@ public:
       tensor_b.device_ref(),
       tensor_c.device_ref(),
       tensor_d.device_ref(),
+      tensor_pit_num.device_data(),
       tensor_pit_idx.device_data(),
       epilogue_op 
     );
@@ -358,16 +365,11 @@ public:
     //
     result.passed = verify_(result.diff);
 
-    std::cout << "SumDiff: " << result.diff << std::endl;
-    return result;
-
-    std::cout << "=========== Sync 1 ==========" << std::endl;
     result.error = cudaDeviceSynchronize();
     if (result.error != cudaSuccess)  {
       std::cerr << "Kernel execution error: " << cudaGetErrorString(result.error);
       return result;
     }
-    std::cout << "=============================" << std::endl;
 
     //
     // Warm-up run
@@ -379,13 +381,11 @@ public:
       return result;
     }
 
-    std::cout << "=========== Sync 2 ==========" << std::endl;
     result.error = cudaDeviceSynchronize();
     if (result.error != cudaSuccess)  {
       std::cerr << "Kernel execution error: " << cudaGetErrorString(result.error);
       return result;
     }
-    std::cout << "=============================" << std::endl;
 
     //
     // Construct events
@@ -412,25 +412,21 @@ public:
     // Run profiling loop
     //
 
-    std::cout << "=========== Sync 3 ==========" << std::endl;
     result.error = cudaDeviceSynchronize();
     if (result.error != cudaSuccess)  {
       std::cerr << "Kernel execution error: " << cudaGetErrorString(result.error);
       return result;
     }
-    std::cout << "=============================" << std::endl;
 
     for (int iter = 0; iter < options.iterations; ++iter) {
       gemm();
     }
 
-    std::cout << "=========== Sync 4 ==========" << std::endl;
     result.error = cudaDeviceSynchronize();
     if (result.error != cudaSuccess)  {
       std::cerr << "Kernel execution error: " << cudaGetErrorString(result.error);
       return result;
     }
-    std::cout << "=============================" << std::endl;
 
     //
     // Stop profiling loop
@@ -533,8 +529,8 @@ int main(int argc, char const **args) {
   using ElementOutput = cutlass::half_t;
   using ElementAccumulator = float;
 
-  using LayoutA = cutlass::layout::RowMajor;
-  using LayoutB = cutlass::layout::ColumnMajor;
+  using LayoutA = cutlass::layout::ColumnMajor;
+  using LayoutB = cutlass::layout::RowMajor;
   using LayoutC = cutlass::layout::RowMajor;
 
   constexpr int32_t kAlignmentA = 128 / cutlass::sizeof_bits<ElementA>::value;
@@ -544,7 +540,8 @@ int main(int argc, char const **args) {
   using WarpShape = cutlass::gemm::GemmShape<64, 64, 32>;
   using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
 
-  constexpr int32_t PitBlockShape = 8;
+  constexpr int32_t PitBlockShape = 1;
+  assert(options.block_size == PitBlockShape);
 
   constexpr int32_t kStages = 4;
   using Gemm = typename cutlass::gemm::device::PitGemm<
@@ -565,7 +562,11 @@ int main(int argc, char const **args) {
         ElementOutput, 128 / cutlass::sizeof_bits<ElementOutput>::value,
         ElementAccumulator, ElementAccumulator>,
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>, 
-    kStages, kAlignmentA, kAlignmentB>;
+    kStages,
+    kAlignmentA,
+    kAlignmentB,
+    false
+  >;
 
   //
   // Profile it
