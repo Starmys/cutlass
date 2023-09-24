@@ -34,6 +34,7 @@ sqllm_kernel_name = 'vecquant4matmul_spmv_hybrid_nuq_perchannel'
 if BATCH_SIZE > 1:
     sqllm_kernel_name += '_batched'
 sqllm_hybrid_kernel = getattr(quant_cuda, sqllm_kernel_name)
+sqllm_quant_kernel = getattr(quant_cuda, sqllm_kernel_name.replace('_spmv_hybrid', ''))
 
 
 def generate_data(dtype: torch.dtype = torch.float32):
@@ -84,6 +85,26 @@ def to_sqllm_inputs(data: dict[str, torch.Tensor]):
         data['quant_weight'].cuda(),
         data['quant_lut'].cuda(),
     ]
+
+
+def sqllm_quant(
+    sparse_rows: torch.Tensor,
+    sparse_cols: torch.Tensor,
+    sparse_weight: torch.Tensor,
+    activations: torch.Tensor,
+    full_weight: torch.Tensor,
+    full_cols: torch.Tensor,
+    quant_weight: torch.Tensor,
+    quant_lut: torch.Tensor,
+):
+    outputs = torch.zeros((BATCH_SIZE, OUT_FEATURES), dtype=torch.float32, device='cuda')
+    sqllm_quant_kernel(
+        activations,
+        quant_weight,
+        outputs,
+        quant_lut,
+    )
+    return outputs
 
 
 def sqllm_hybrid(
@@ -192,8 +213,9 @@ if __name__ == '__main__':
 
     torch.testing.assert_close(torch_output, sqllm_output, rtol=1e-4, atol=1e-4)
 
-    print(f'PyTorch Dense: {profile(torch_ref, torch_inputs):.6f} ms')
-    print(f' SQLLM Hybrid: {profile(sqllm_hybrid, sqllm_inputs):.6f} ms')
+    print(f'PyTorch Dense : {profile(torch_ref, torch_inputs):.6f} ms')
+    print(f'  SQLLM Quant : {profile(sqllm_quant, sqllm_inputs):.6f} ms')
+    print(f'  SQLLM Hybrid: {profile(sqllm_hybrid, sqllm_inputs):.6f} ms')
 
     os.makedirs(TARGET_PATH, exist_ok=True)
 
