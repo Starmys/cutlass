@@ -22,7 +22,7 @@
 #include "cutlass/util/reference/host/tensor_norm.h"
 
 #include "squeeze_llm_gemv_device.h"
-// #include "gemv_kernel.h"
+#include "gemv_kernel.h"
 #include "gemv_kernel_batched.h"
 // #include "squeeze_llm_gemv_kernel_raw.h"
 // #include "squeeze_llm_gemv_kernel_sync.h"
@@ -502,6 +502,10 @@ int main(int argc, char const **args) {
   // int const kStride = 128;
   int const kThreadCount = 64;
   int const kStride = 256;
+
+  assert(options.batch > 0);
+  assert(options.batch <= 32);
+
   using GemvKernel = cutlass::gemm::kernel::SqueezeLLMGemv<ElementA,
                                                            LayoutA,
                                                            ElementB,
@@ -509,7 +513,8 @@ int main(int argc, char const **args) {
                                                            ElementAccumulator,
                                                            kElementsPerAccess,
                                                            kThreadCount,
-                                                           kStride>;
+                                                           kStride,
+                                                           2>;
   using Gemv = cutlass::gemm::device::SqueezeLLMGemv<GemvKernel>;
 
   //

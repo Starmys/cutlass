@@ -13,6 +13,8 @@
 #include "cutlass/layout/matrix.h"
 
 #include "cutlass/numeric_conversion.h"
+
+#include "gemv_kernel.h"
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 namespace cutlass {
@@ -20,19 +22,6 @@ namespace gemm {
 namespace kernel {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
-
-template <
-  typename ElementA_,
-  typename LayoutA_,
-  typename ElementB_,
-  typename ElementC_,
-  typename ElementAccumulator_,
-  int kElementsPerAccess_ = 1,            ///< Number of elements involved in a global access.
-  int kThreadCount_ = 0,                  ///< Number of threads in the thread block.
-                                          ///  It will be calculated automatically if set to 0.
-  int kStride_ = 0
->
-struct SqueezeLLMGemv;
 
 // GEMV for row-major A matrix
 template <
@@ -42,17 +31,19 @@ template <
     typename ElementAccumulator_,
     int kElementsPerAccess_,
     int kThreadCount_,
-    int kStride_ 
+    int kStride_,
+    int kBatchSize_
 >
 struct SqueezeLLMGemv <
-    ElementA_,            
+    ElementA_,
     layout::RowMajor,
-    ElementB_,            
+    ElementB_,
     ElementC_,
     ElementAccumulator_,
     kElementsPerAccess_,
     kThreadCount_,
-    kStride_
+    kStride_,
+    kBatchSize_
 >{
 public:
 
@@ -77,7 +68,7 @@ public:
   using FragmentA = Array<ElementA, kElementsPerAccess>;
   using FragmentB = Array<ElementB, kElementsPerAccess>;
 
-  static int const kMaxBatchSize = 8;
+  static int const kBatchSize = kBatchSize_;
   static int const kBitsPerSegment = 4;
   static int const kThreadCount = (kThreadCount_ <= 0) ? 128 : kThreadCount_;
   static int const kStride = (kStride_ <= 0) ? 128 : kStride_;
@@ -86,10 +77,11 @@ public:
   static int const kQuantBlockWidth = kStride * kBitsPerSegment / sizeof_bits<ElementQ>::value;
   static int const kQuantsPerAccess = 4;
   static int const kResidualQuants = kQuantBlockWidth % kQuantsPerAccess;
+  static int const kActivationStride = ((kThreadCount * kElementsPerAccess) / kBatchSize) & ~(kThreadsPerRow - 1);
 
   using FragmentQ = Array<ElementQ, kQuantsPerAccess>;
   using FragmentL = Array<ElementA, kThreadsPerRow>;
-  using FragmentCompute = Array<ElementAccumulator, kMaxBatchSize>;
+  using FragmentCompute = Array<ElementAccumulator, kBatchSize>;
 
   //
   // Structures
@@ -139,7 +131,9 @@ public:
       batch_stride_B(batch_stride_B),
       batch_stride_C(batch_stride_C),
       batch_stride_D(batch_stride_D)
-    { }
+    {
+      assert(batch_count == kBatchSize);
+    }
 
     Status update(Arguments const &args) {
       problem_size = args.problem_size;
@@ -163,8 +157,7 @@ public:
   struct SharedStorage {
     static int const kStrideRow = kThreadsPerRow + 1;
     static int const kStrideCol = 1;
-    AlignedArray<ElementB, kMaxBatchSize * kStride> activations;
-    // AlignedArray<ElementB, kStride> activations;
+    Array<ElementB, kBatchSize * kActivationStride> activations;
     Array<ElementA, kThreadCount * (kThreadsPerRow + 1)> weight;
   };
 
@@ -298,52 +291,62 @@ public:
     WeightIterator iterator_A(ptr_A, ptr_L, &shared_storage.weight[0]);
 
     FragmentCompute accum;
-    for (int batch_idx = 0; batch_idx < params.batch_count; batch_idx++) {
+    CUTLASS_PRAGMA_UNROLL
+    for (int batch_idx = 0; batch_idx < kBatchSize; batch_idx++) {
       accum.at(batch_idx) = 0.0f;
     }
 
     // load activations
-    for (int batch_idx = 0; batch_idx < params.batch_count; batch_idx++) {
-      CUTLASS_PRAGMA_UNROLL
-      for (int offset = threadIdx.x * kElementsPerAccess; offset < kStride; offset += kThreadCount * kElementsPerAccess) {
-        reinterpret_cast<FragmentB*>(&shared_storage.activations[batch_idx * kStride + offset])[0] =
-          reinterpret_cast<const FragmentB*>(&ptr_B[batch_idx * params.batch_stride_B + offset])[0];
-      }
-    }
+    // for (int batch_idx = 0; batch_idx < params.batch_count; batch_idx++) {
+    //   CUTLASS_PRAGMA_UNROLL
+    //   for (int offset = threadIdx.x * kElementsPerAccess; offset < kStride; offset += kThreadCount * kElementsPerAccess) {
+    //     reinterpret_cast<FragmentB*>(&shared_storage.activations[batch_idx * kStride + offset])[0] =
+    //       reinterpret_cast<const FragmentB*>(&ptr_B[batch_idx * params.batch_stride_B + offset])[0];
+    //   }
+    // }
     // for (int offset = threadIdx.x * kElementsPerAccess; offset < kStride; offset += kThreadCount * kElementsPerAccess) {
     //   reinterpret_cast<FragmentB*>(&shared_storage.activations[offset])[0] =
     //     reinterpret_cast<const FragmentB*>(&ptr_B[offset])[0];
     // }
-    __syncthreads();
+    // __syncthreads();
 
     CUTLASS_PRAGMA_UNROLL
     for (int unroll_col_k = 0, advance = 0, index = 0, offset = 0; unroll_col_k < kStride; unroll_col_k += kThreadsPerRow) {
 
+      if (unroll_col_k % kActivationStride == 0) {
+        if (unroll_col_k > 0) __syncthreads();
+        CUTLASS_PRAGMA_UNROLL
+        for (
+          int k = threadIdx.x * kElementsPerAccess;
+          (k < kBatchSize * kActivationStride) && (unroll_col_k + k % kActivationStride < kStride);
+          k += kThreadCount * kElementsPerAccess
+        ) {
+          int batch_idx = k / kActivationStride;
+          int offset = k % kActivationStride;
+          reinterpret_cast<FragmentB*>(&shared_storage.activations[k])[0] =
+            reinterpret_cast<const FragmentB*>(&ptr_B[batch_idx * params.batch_stride_B + unroll_col_k + offset])[0];
+        }
+        __syncthreads();
+      }
+
       iterator_A.next_block(advance, index, offset);
 
-      // for (int batch_idx = 0; batch_idx < params.batch_count; batch_idx++) {
-
-      //   CUTLASS_PRAGMA_UNROLL
-      //   for (int e = 0; e < kThreadsPerRow; e++) {
-      //     accum.at(batch_idx) += shared_storage.weight[threadIdx.x * SharedStorage::kStrideRow + e * SharedStorage::kStrideCol] *
-      //       shared_storage.activations[unroll_col_k + e];
-      //   }
-
-      // }
-
       CUTLASS_PRAGMA_UNROLL
-      for (int e = 0; e < kThreadsPerRow; e++) {
-        accum.at(0) += shared_storage.weight[threadIdx.x * SharedStorage::kStrideRow + e * SharedStorage::kStrideCol] *
-          shared_storage.activations[unroll_col_k + e];
+      for (int batch_idx = 0; batch_idx < kBatchSize; batch_idx++) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int e = 0; e < kThreadsPerRow; e++) {
+          accum.at(batch_idx) += shared_storage.weight[threadIdx.x * SharedStorage::kStrideRow + e * SharedStorage::kStrideCol] *
+            shared_storage.activations[batch_idx * kActivationStride + unroll_col_k % kActivationStride + e];
+        }
       }
 
     }
 
-      atomicAdd(ptr_D, accum.at(0));
-    // for (int batch_idx = 0; batch_idx < params.batch_count; batch_idx ++) {
-    //   atomicAdd(ptr_D, accum.at(batch_idx));
-    //   ptr_D += params.batch_stride_D;
-    // }
+    CUTLASS_PRAGMA_UNROLL
+    for (int batch_idx = 0; batch_idx < kBatchSize; batch_idx++) {
+      atomicAdd(ptr_D, accum.at(batch_idx));
+      ptr_D += params.batch_stride_D;
+    }
 
   }
 };

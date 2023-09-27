@@ -30,7 +30,8 @@ template <
   int kElementsPerAccess_ = 1,            ///< Number of elements involved in a global access.
   int kThreadCount_ = 0,                  ///< Number of threads in the thread block.
                                           ///  It will be calculated automatically if set to 0.
-  int kStride_ = 0
+  int kStride_ = 0,
+  int kBatchSize_ = 1
 >
 struct SqueezeLLMGemv;
 
@@ -42,7 +43,7 @@ template <
     typename ElementAccumulator_,
     int kElementsPerAccess_,
     int kThreadCount_,
-    int kStride_ 
+    int kStride_
 >
 struct SqueezeLLMGemv <
     ElementA_,            
@@ -52,7 +53,8 @@ struct SqueezeLLMGemv <
     ElementAccumulator_,
     kElementsPerAccess_,
     kThreadCount_,
-    kStride_
+    kStride_,
+    1
 >{
 public:
 
@@ -138,7 +140,9 @@ public:
       batch_stride_B(batch_stride_B),
       batch_stride_C(batch_stride_C),
       batch_stride_D(batch_stride_D)
-    { }
+    {
+      assert(batch_count == 1);
+    }
 
     Status update(Arguments const &args) {
       problem_size = args.problem_size;
@@ -208,7 +212,7 @@ public:
     // move in the m dimension
     ElementA const *ptr_L = params.ptr_L + (idx_row_m + warp_offset) * kThreadsPerRow;
     ElementB const *ptr_B = params.ptr_B;
-    ElementC const *ptr_C = params.ptr_C + idx_row_m + threadIdx.x;
+    // ElementC const *ptr_C = params.ptr_C + idx_row_m + threadIdx.x;
     ElementC *ptr_D = params.ptr_D + idx_row_m + threadIdx.x;
 
     // move in the k dimension
@@ -221,80 +225,71 @@ public:
       fragL[i] = ptr_L[i * kThreadsPerRow + lane_id];
     }
 
-    // Loop over batch indices
-    for (int batch_idx = blockIdx.z; batch_idx < params.batch_count; batch_idx += gridDim.z) {
+    // load activations
+    CUTLASS_PRAGMA_UNROLL
+    for (int offset = threadIdx.x * kElementsPerAccess; offset < kStride; offset += kThreadCount * kElementsPerAccess) {
+      reinterpret_cast<FragmentB*>(&shared_storage.activations[offset])[0] =
+        reinterpret_cast<const FragmentB*>(&ptr_B[offset])[0];
+    }
+    __syncthreads();
 
-      // load activations
+    FragmentCompute accum;
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < kThreadsPerRow; i++) {
+      accum.at(i) = 0.0f;
+    }
+
+    FragmentQ fragQ;
+    int residual;
+
+    CUTLASS_PRAGMA_UNROLL
+    for (int quant_k = 0, offset = 0, k = 0; quant_k < kQuantBlockWidth; quant_k += kQuantsPerAccess) {
+
+      arch::global_load<FragmentQ, sizeof(FragmentQ), arch::CacheOperation::LastUse>(
+        fragQ,
+        // ptr_A + quant_k,
+        ptr_A + quant_k * kThreadsPerRow,
+        true
+      );
+
       CUTLASS_PRAGMA_UNROLL
-      for (int offset = threadIdx.x * kElementsPerAccess; offset < kStride; offset += kThreadCount * kElementsPerAccess) {
-        reinterpret_cast<FragmentB*>(&shared_storage.activations[offset])[0] =
-          reinterpret_cast<const FragmentB*>(&ptr_B[offset])[0];
-      }
-      __syncthreads();
-
-      FragmentCompute accum;
-      CUTLASS_PRAGMA_UNROLL
-      for (int i = 0; i < kThreadsPerRow; i++) {
-        accum.at(i) = 0.0f;
-      }
-
-      FragmentQ fragQ;
-      int residual;
-
-      CUTLASS_PRAGMA_UNROLL
-      for (int quant_k = 0, offset = 0, k = 0; quant_k < kQuantBlockWidth; quant_k += kQuantsPerAccess) {
-
-        arch::global_load<FragmentQ, sizeof(FragmentQ), arch::CacheOperation::LastUse>(
-          fragQ,
-          // ptr_A + quant_k,
-          ptr_A + quant_k * kThreadsPerRow,
-          true
-        );
-
-        CUTLASS_PRAGMA_UNROLL
-        for (int e = 0; e < kQuantsPerAccess; e++) {
-          if (offset > 0) {
-            int unroll_row_m = k & (kThreadsPerRow - 1);
-            int unroll_col_k = k & ~(kThreadsPerRow - 1);
-            int idx = ((fragQ.at(e) & ((1 << offset) - 1)) << (kBitsPerSegment - offset)) | residual;
-            ElementA val = __shfl_sync(0xFFFFFFFF, fragL.at(unroll_row_m), sync_offset + idx);
-            ElementB act = shared_storage.activations[unroll_col_k + lane_id];
-            accum.at(unroll_row_m) += val * act;
-            k++;
-          }
-          CUTLASS_PRAGMA_UNROLL
-          for (int q = 0; q < sizeof_bits<ElementQ>::value / kBitsPerSegment; q++, offset += kBitsPerSegment, k++) {
-            int unroll_row_m = k & (kThreadsPerRow - 1);
-            int unroll_col_k = k & ~(kThreadsPerRow - 1);
-            int idx = (fragQ.at(e) >> offset) & (kThreadsPerRow - 1);
-            ElementA val = __shfl_sync(0xFFFFFFFF, fragL.at(unroll_row_m), sync_offset + idx);
-            ElementB act = shared_storage.activations[unroll_col_k + lane_id];
-            accum.at(unroll_row_m) += val * act;
-          }
-          if (offset != sizeof_bits<ElementQ>::value) {
-            residual = fragQ.at(e) >> offset;
-          }
-          offset %= sizeof_bits<ElementQ>::value;
+      for (int e = 0; e < kQuantsPerAccess; e++) {
+        if (offset > 0) {
+          int unroll_row_m = k & (kThreadsPerRow - 1);
+          int unroll_col_k = k & ~(kThreadsPerRow - 1);
+          int idx = ((fragQ.at(e) & ((1 << offset) - 1)) << (kBitsPerSegment - offset)) | residual;
+          ElementA val = __shfl_sync(0xFFFFFFFF, fragL.at(unroll_row_m), sync_offset + idx);
+          ElementB act = shared_storage.activations[unroll_col_k + lane_id];
+          accum.at(unroll_row_m) += val * act;
+          k++;
         }
-
-      }
-
-      CUTLASS_PRAGMA_UNROLL
-      for (int unroll_row_m = 0; unroll_row_m < kThreadsPerRow; unroll_row_m++) {
         CUTLASS_PRAGMA_UNROLL
-        for (int mask = (kThreadsPerRow >> 1); mask > 0; mask >>= 1) {
-          accum.at(unroll_row_m) += __shfl_xor_sync(0xFFFFFFFF, accum.at(unroll_row_m), mask);
+        for (int q = 0; q < sizeof_bits<ElementQ>::value / kBitsPerSegment; q++, offset += kBitsPerSegment, k++) {
+          int unroll_row_m = k & (kThreadsPerRow - 1);
+          int unroll_col_k = k & ~(kThreadsPerRow - 1);
+          int idx = (fragQ.at(e) >> offset) & (kThreadsPerRow - 1);
+          ElementA val = __shfl_sync(0xFFFFFFFF, fragL.at(unroll_row_m), sync_offset + idx);
+          ElementB act = shared_storage.activations[unroll_col_k + lane_id];
+          accum.at(unroll_row_m) += val * act;
         }
+        if (offset != sizeof_bits<ElementQ>::value) {
+          residual = fragQ.at(e) >> offset;
+        }
+        offset %= sizeof_bits<ElementQ>::value;
       }
-
-      atomicAdd(ptr_D, accum.at(lane_id));
-
-      // move in the batch dimension
-      ptr_B += params.batch_stride_B;
-      ptr_C += params.batch_stride_C;
-      ptr_D += params.batch_stride_D;
 
     }
+
+    CUTLASS_PRAGMA_UNROLL
+    for (int unroll_row_m = 0; unroll_row_m < kThreadsPerRow; unroll_row_m++) {
+      CUTLASS_PRAGMA_UNROLL
+      for (int mask = (kThreadsPerRow >> 1); mask > 0; mask >>= 1) {
+        accum.at(unroll_row_m) += __shfl_xor_sync(0xFFFFFFFF, accum.at(unroll_row_m), mask);
+      }
+    }
+
+    atomicAdd(ptr_D, accum.at(lane_id));
+
   }
 };
 

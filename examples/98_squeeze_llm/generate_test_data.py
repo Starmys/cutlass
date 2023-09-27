@@ -13,7 +13,7 @@ TARGET_PATH = os.path.join(
     'data'
 )
 
-BATCH_SIZE = 1
+BATCH_SIZE = 2
 IN_FEATURES = 4096
 OUT_FEATURES = 4096
 W_BITS = 4
