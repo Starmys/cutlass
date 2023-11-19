@@ -1,7 +1,7 @@
 import os
 
 import torch
-from scipy.sparse import csc_array, coo_array
+from scipy.sparse import csc_array, csr_array, coo_array
 from sparta.testing import profile
 
 import quant_cuda
@@ -13,9 +13,9 @@ TARGET_PATH = os.path.join(
     'data'
 )
 
-BATCH_SIZE = 2
-IN_FEATURES = 4096
-OUT_FEATURES = 4096
+BATCH_SIZE = 1
+IN_FEATURES = 8192  # 4096
+OUT_FEATURES = 8192  # 4096
 W_BITS = 4
 SPARSITY = 0.0045
 TOP_X = 10
@@ -24,6 +24,7 @@ BLOCK_SIZE_OUT = 64
 BLOCK_SIZE_IN = 256
 NUM_BLOCKS_OUT = OUT_FEATURES // BLOCK_SIZE_OUT
 NUM_BLOCKS_IN = OUT_FEATURES // BLOCK_SIZE_IN
+ROWS = OUT_FEATURES * (IN_FEATURES // BLOCK_SIZE_IN)
 
 WARP_SIZE = 1 << W_BITS
 NUM_WARPS = BLOCK_SIZE_IN // WARP_SIZE
@@ -48,8 +49,8 @@ def generate_data(dtype: torch.dtype = torch.float32):
     quant_lut = torch.randn((OUT_FEATURES, 2 ** W_BITS), dtype=dtype, device='cpu')
 
     sparse_nnz = round(IN_FEATURES * OUT_FEATURES * SPARSITY)
-    # sparse_weight = torch.randn((sparse_nnz, ), dtype=torch.float32, device='cpu')
-    sparse_weight = torch.zeros((sparse_nnz, ), dtype=torch.float32, device='cpu')
+    sparse_weight = torch.randn((sparse_nnz, ), dtype=torch.float32, device='cpu')
+    # sparse_weight = torch.zeros((sparse_nnz, ), dtype=torch.float32, device='cpu')
     sparse_rows = torch.randint(0, IN_FEATURES, (sparse_nnz, ), dtype=torch.int32, device='cpu')
     sparse_cols = torch.randint(0, OUT_FEATURES, (sparse_nnz, ), dtype=torch.int32, device='cpu')
 
@@ -171,11 +172,25 @@ def to_cutlass_inputs(data: dict[str, torch.Tensor], ref_output: torch.Tensor):
         -1, WARP_SIZE, BLOCK_SIZE_Q // ACCESS_SIZE, ACCESS_SIZE
     )).swapaxes(1, 2)
     # quant_weight = data['quant_weight'].T
+    sparse_weight = data['sparse_weight'].cpu().numpy()
+    sparse_rows = data['sparse_rows'].cpu().numpy()
+    sparse_cols = data['sparse_cols'].cpu().numpy()
+    sparse_arr = coo_array((sparse_weight, (sparse_rows, sparse_cols)), shape=(IN_FEATURES, OUT_FEATURES))
+    sparse_arr = torch.tensor(sparse_arr.toarray())
+    for col_idx, col_val in zip(data['full_cols'], data['full_weight'].T):
+        sparse_arr[:, col_idx] += col_val
+    sparse_arr = sparse_arr.T.reshape((
+        NUM_BLOCKS_OUT, BLOCK_SIZE_OUT, NUM_BLOCKS_IN, BLOCK_SIZE_IN
+    )).swapaxes(1, 2).reshape((ROWS, BLOCK_SIZE_IN))
+    sparse_arr = csr_array(sparse_arr, shape=(ROWS, BLOCK_SIZE_IN))
     return {
         'activations': data['activations'],
         # 'weight': torch_inputs[1].T,
         'quant_weight': quant_weight,
         'quant_lut': data['quant_lut'],
+        'sparse_weight': torch.tensor(sparse_arr.data, dtype=data['sparse_weight'].dtype, device='cuda'),
+        'sparse_row': torch.tensor(sparse_arr.indptr[:ROWS + 1], dtype=torch.int32, device='cuda'),
+        'sparse_col': torch.tensor(sparse_arr.indices, dtype=torch.int32, device='cuda'),
         'output': ref_output,
     }
 
@@ -213,19 +228,24 @@ if __name__ == '__main__':
 
     torch.testing.assert_close(torch_output, sqllm_output, rtol=1e-4, atol=1e-4)
 
-    print(f'PyTorch Dense : {profile(torch_ref, torch_inputs):.6f} ms')
-    print(f'  SQLLM Quant : {profile(sqllm_quant, sqllm_inputs):.6f} ms')
-    print(f'  SQLLM Hybrid: {profile(sqllm_hybrid, sqllm_inputs):.6f} ms')
+    torch_inputs_fp16 = [x.to(torch.float16) for x in torch_inputs]
+    print(f'PyTorch Dense (FP16): {profile(torch_ref, torch_inputs_fp16):.6f} ms')
+    print(f'PyTorch Dense (FP32): {profile(torch_ref, torch_inputs):.6f} ms')
+    print(f'  SQLLM Quant       : {profile(sqllm_quant, sqllm_inputs):.6f} ms')
+    print(f'  SQLLM Hybrid      : {profile(sqllm_hybrid, sqllm_inputs):.6f} ms')
 
     os.makedirs(TARGET_PATH, exist_ok=True)
 
-    save_data(to_cutlass_inputs(data, torch_output), TARGET_PATH)
+    cutlass_inputs = to_cutlass_inputs(data, torch_output)
+    save_data(cutlass_inputs, TARGET_PATH)
 
     cmd = os.path.join('.', EXAMPLE_PATH, '98_squeeze_llm')
     args = {
         'batch': BATCH_SIZE,
         'N': OUT_FEATURES,
         'K': IN_FEATURES,
+        'nnz': cutlass_inputs['sparse_row'][-1].item(),
+        'rows': ROWS,
     }
     cmd += ''.join([f' --{k}={v}' for k, v in args.items()])
     with open(os.path.join(TARGET_PATH, 'cmd.txt'), 'w') as f:

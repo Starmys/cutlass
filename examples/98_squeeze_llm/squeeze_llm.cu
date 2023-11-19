@@ -70,7 +70,7 @@ struct Result {
 struct Options {
 
   bool help;
-  int batch, K, N;
+  int batch, K, N, nnz, rows;
   int iterations;
 
   //
@@ -82,6 +82,8 @@ struct Options {
     batch(1),
     K(4096),
     N(4096),
+    nnz(1),
+    rows(4096 * (4096 / 256)),
     iterations(20)
   { }
 
@@ -96,6 +98,8 @@ struct Options {
     cmd.get_cmd_line_argument("batch", batch, 1);
     cmd.get_cmd_line_argument("K", K, 4096);
     cmd.get_cmd_line_argument("N", N, 4096);
+    cmd.get_cmd_line_argument("nnz", nnz, 4096);
+    cmd.get_cmd_line_argument("rows", rows, 4096 * (4096 / 256));
     cmd.get_cmd_line_argument("iterations", iterations, 20);
   }
 
@@ -120,6 +124,8 @@ struct Options {
       << "  --batch=<int>               Sets the batch size.\n"
       << "  --N=<int>                   Sets the N dimension.\n"
       << "  --K=<int>                   Sets the K dimension.\n"
+      << "  --nnz=<int>                 Sets the number of sparse values.\n"
+      << "  --rows=<int>                Sets the number of block rows.\n"
       << "  --iterations=<int>          Number of profiling iterations to perform.\n";
 
     out << "\n\nExamples:\n\n"
@@ -162,6 +168,9 @@ private:
 
   cutlass::HostTensor<int, LayoutA> tensor_quant_weight;
   cutlass::HostTensor<ElementA, LayoutA> tensor_quant_lut;
+  cutlass::HostTensor<ElementA, LayoutA> tensor_sparse_weight;
+  cutlass::HostTensor<int, LayoutA> tensor_sparse_row;
+  cutlass::HostTensor<int, LayoutA> tensor_sparse_col;
   cutlass::HostTensor<ElementA, LayoutA> tensor_weight;
   cutlass::HostTensor<ElementB, LayoutB> tensor_activations;
   cutlass::HostTensor<ElementC, LayoutC> tensor_bias;
@@ -180,6 +189,9 @@ private:
   void initialize_() {
     tensor_quant_weight.resize({options.N, options.K / 8});
     tensor_quant_lut.resize({options.N, 16});
+    tensor_sparse_weight.resize({1, options.nnz});
+    tensor_sparse_row.resize({1, options.rows + 1});
+    tensor_sparse_col.resize({1, options.nnz});
     tensor_weight.resize({options.N, options.K});
     tensor_activations.resize({options.batch, options.K});
     tensor_bias.resize({options.batch, options.N});
@@ -189,14 +201,20 @@ private:
 
     std::string data_folder = "examples/98_squeeze_llm/data/";
     load_array_from_file<int, int>(tensor_quant_weight.host_ref().data(), data_folder + "quant_weight.txt");
-    load_array_from_file<float, float>(tensor_quant_lut.host_ref().data(), data_folder + "quant_lut.txt");
+    load_array_from_file<float, ElementA>(tensor_quant_lut.host_ref().data(), data_folder + "quant_lut.txt");
+    load_array_from_file<float, ElementA>(tensor_sparse_weight.host_ref().data(), data_folder + "sparse_weight.txt");
+    load_array_from_file<int, int>(tensor_sparse_row.host_ref().data(), data_folder + "sparse_row.txt");
+    load_array_from_file<int, int>(tensor_sparse_col.host_ref().data(), data_folder + "sparse_col.txt");
     // load_array_from_file<float, float>(tensor_weight.host_ref().data(), data_folder + "weight.txt");
-    load_array_from_file<float, float>(tensor_activations.host_ref().data(), data_folder + "activations.txt");
-    load_array_from_file<float, float>(reference_output.host_ref().data(), data_folder + "output.txt");
+    load_array_from_file<float, ElementB>(tensor_activations.host_ref().data(), data_folder + "activations.txt");
+    load_array_from_file<float, ElementB>(reference_output.host_ref().data(), data_folder + "output.txt");
     cutlass::reference::host::TensorFill(tensor_output.host_view());
 
     tensor_quant_weight.sync_device();
     tensor_quant_lut.sync_device();
+    tensor_sparse_weight.sync_device();
+    tensor_sparse_row.sync_device();
+    tensor_sparse_col.sync_device();
     tensor_weight.sync_device();
     tensor_activations.sync_device();
     tensor_bias.sync_device();
@@ -233,6 +251,9 @@ private:
       results
         << "\nQuant Weight:\n" << tensor_quant_weight.host_view() << "\n"
         << "\nQuant LUT:\n" << tensor_quant_lut.host_view() << "\n"
+        << "\nSparse Weight:\n" << tensor_sparse_weight.host_view() << "\n"
+        << "\nSparse Row Ptr:\n" << tensor_sparse_row.host_view() << "\n"
+        << "\nSparse Col Idx:\n" << tensor_sparse_col.host_view() << "\n"
         << "\nActivations:\n" << tensor_activations.host_view() << "\n"
         << "\nOutput Reference:\n" << reference_output.host_view() << "\n"
         << "\nOutput Computed:\n" << tensor_output.host_view() << "\n";
@@ -296,6 +317,9 @@ public:
       // tensor_weight.device_ref(),
       tensor_quant_weight.device_ref(),
       tensor_quant_lut.device_data(),
+      tensor_sparse_weight.device_data(),
+      tensor_sparse_row.device_data(),
+      tensor_sparse_col.device_data(),
       tensor_activations.device_data(),
       tensor_bias.device_data(),
       tensor_output.device_data(),
@@ -489,13 +513,13 @@ int main(int argc, char const **args) {
   }
 
   using ElementA = float;
-  using ElementB = float;
-  using ElementOutput = float;
+  using ElementB = cutlass::half_t;
+  using ElementOutput = cutlass::half_t;
   using ElementAccumulator = float;
 
   using LayoutA = cutlass::layout::RowMajor;
 
-  int const kElementsPerAccess = 4;
+  int const kElementsPerAccess = 8;
   // int const kThreadCount = 64; // reg, sync
   // int const kStride = 256;
   // int const kThreadCount = 128; // smem
@@ -514,7 +538,7 @@ int main(int argc, char const **args) {
                                                            kElementsPerAccess,
                                                            kThreadCount,
                                                            kStride,
-                                                           2>;
+                                                           1>;
   using Gemv = cutlass::gemm::device::SqueezeLLMGemv<GemvKernel>;
 
   //

@@ -104,6 +104,9 @@ public:
     TensorRefA      ref_A;
 
     ElementA const *ptr_L;
+    ElementA const *ptr_S;
+    int32_t  const *ptr_row;
+    int32_t  const *ptr_col;
     ElementB const *ptr_B;
     ElementC const *ptr_C;
     ElementC       *ptr_D;
@@ -123,6 +126,9 @@ public:
       int32_t     batch_count,
       TensorRefA  ref_A,
       void const *ptr_L,
+      void const *ptr_S,
+      void const *ptr_row,
+      void const *ptr_col,
       void const *ptr_B,
       void const *ptr_C,
       void       *ptr_D,
@@ -134,6 +140,9 @@ public:
       batch_count(batch_count),
       ref_A(ref_A),
       ptr_L(static_cast<ElementA const *>(ptr_L)),
+      ptr_S(static_cast<ElementA const *>(ptr_S)),
+      ptr_row(static_cast<int32_t const *>(ptr_row)),
+      ptr_col(static_cast<int32_t const *>(ptr_col)),
       ptr_B(static_cast<ElementB const *>(ptr_B)),
       ptr_C(static_cast<ElementC const *>(ptr_C)),
       ptr_D(static_cast<ElementC       *>(ptr_D)),
@@ -164,7 +173,7 @@ public:
 
   /// Shared memory storage structure
   union SharedStorage {
-    AlignedArray<ElementB, kStride> activations;
+    AlignedArray<half, kStride> activations;
   };
 
 public:
@@ -203,17 +212,28 @@ public:
     // vector C (batch, m, 1)
     // vector D (batch, m, 1)
 
+    int block_idx = blockIdx.y * gridDim.x + blockIdx.x;
+
     // move quant matrix pointer
     ElementQ const *ptr_A = params.ref_A.data();
-    ptr_A += (blockIdx.y * gridDim.x + blockIdx.x) * (kThreadCount * kQuantBlockWidth);
+    ptr_A += block_idx * (kThreadCount * kQuantBlockWidth);
     // ptr_A += (warp_offset + lane_id) * kQuantBlockWidth;
     ptr_A += warp_offset * kQuantBlockWidth + lane_id * kQuantsPerAccess;
 
+    // move sparse matrix pointer
+    int32_t const *ptr_row = params.ptr_row + block_idx * kThreadCount;
+    int sparse_start = ptr_row[threadIdx.x];
+    int sparse_end = ptr_row[threadIdx.x + 1];
+    ElementA const *ptr_S = params.ptr_S;
+    int32_t const *ptr_col = params.ptr_col;
+
     // move in the m dimension
     ElementA const *ptr_L = params.ptr_L + (idx_row_m + warp_offset) * kThreadsPerRow;
-    ElementB const *ptr_B = params.ptr_B;
+    // ElementB const *ptr_B = params.ptr_B;
+    half const *ptr_B = reinterpret_cast<const half*>(&params.ptr_B[0]);
     // ElementC const *ptr_C = params.ptr_C + idx_row_m + threadIdx.x;
-    ElementC *ptr_D = params.ptr_D + idx_row_m + threadIdx.x;
+    // ElementC *ptr_D = params.ptr_D + idx_row_m + threadIdx.x;
+    half *ptr_D = reinterpret_cast<half*>(&params.ptr_D[idx_row_m + threadIdx.x]);
 
     // move in the k dimension
     ptr_B += blockIdx.x * kStride;
@@ -230,13 +250,17 @@ public:
     for (int offset = threadIdx.x * kElementsPerAccess; offset < kStride; offset += kThreadCount * kElementsPerAccess) {
       reinterpret_cast<FragmentB*>(&shared_storage.activations[offset])[0] =
         reinterpret_cast<const FragmentB*>(&ptr_B[offset])[0];
+
+      if (blockIdx.x == 0 && threadIdx.x == 0) {
+        printf("# Load [%d][%d] %f\n", lane_id, offset, __half2float(half(shared_storage.activations[offset])));
+      }
     }
     __syncthreads();
 
     FragmentCompute accum;
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < kThreadsPerRow; i++) {
-      accum.at(i) = 0.0f;
+      accum.at(i) = (ElementAccumulator)(0.0f);
     }
 
     FragmentQ fragQ;
@@ -259,8 +283,8 @@ public:
           int unroll_col_k = k & ~(kThreadsPerRow - 1);
           int idx = ((fragQ.at(e) & ((1 << offset) - 1)) << (kBitsPerSegment - offset)) | residual;
           ElementA val = __shfl_sync(0xFFFFFFFF, fragL.at(unroll_row_m), sync_offset + idx);
-          ElementB act = shared_storage.activations[unroll_col_k + lane_id];
-          accum.at(unroll_row_m) += val * act;
+          half act = shared_storage.activations[unroll_col_k + lane_id];
+          accum.at(unroll_row_m) += val * __half2float(act);
           k++;
         }
         CUTLASS_PRAGMA_UNROLL
@@ -269,8 +293,12 @@ public:
           int unroll_col_k = k & ~(kThreadsPerRow - 1);
           int idx = (fragQ.at(e) >> offset) & (kThreadsPerRow - 1);
           ElementA val = __shfl_sync(0xFFFFFFFF, fragL.at(unroll_row_m), sync_offset + idx);
-          ElementB act = shared_storage.activations[unroll_col_k + lane_id];
-          accum.at(unroll_row_m) += val * act;
+          half act = shared_storage.activations[unroll_col_k + lane_id];
+          accum.at(unroll_row_m) += val * __half2float(act);
+
+          // if (blockIdx.x == 0 && threadIdx.x == 0) {
+          //   printf("# Input [%d][%d] %f\n", lane_id, k, __half2float(act));
+          // }
         }
         if (offset != sizeof_bits<ElementQ>::value) {
           residual = fragQ.at(e) >> offset;
@@ -288,7 +316,17 @@ public:
       }
     }
 
-    atomicAdd(ptr_D, accum.at(lane_id));
+    // sparse
+    for (int sparse_idx = sparse_start; sparse_idx < sparse_end; sparse_idx++) {
+      half act = shared_storage.activations[ptr_col[sparse_idx]];
+      accum.at(lane_id) += ptr_S[sparse_idx] * __half2float(act);
+    }
+
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+      printf("# Output [%d] %f\n", lane_id, accum.at(lane_id));
+    }
+
+    atomicAdd(ptr_D, __float2half(accum.at(lane_id)));
 
   }
 };
