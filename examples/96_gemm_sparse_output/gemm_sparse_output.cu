@@ -92,6 +92,12 @@ void gemm_device(
   Tensor gC = local_tile(mC, cta_tiler, cta_coord, Step<_1,_1, X>{});  // (BLK_M,BLK_N)
   Tensor gD = local_tile(mD, cta_tiler, cta_coord, Step<_1,_1, X>{});  // (BLK_M,BLK_N)
 
+  // Compute tile residues for predication
+  auto m_max_coord = size<0>(shape_MNK) - size<0>(gA) * blockIdx.x;   // M - BLK_M * m_coord
+  auto n_max_coord = size<1>(shape_MNK) - size<0>(gB) * blockIdx.y;   // N - BLK_N * n_coord
+  auto k_residue   = size<2>(shape_MNK) - size<1>(gA) * size<2>(gA);  // K - BLK_K * k_coord_max
+  auto residue_mnk = make_tuple(m_max_coord, n_max_coord, k_residue);
+
   // Construct shared memory tiles
   extern __shared__ char smem_buf[];
   typedef struct {
@@ -111,6 +117,11 @@ void gemm_device(
 
   auto K_PIPE_MAX = size<2>(sA);
 
+  // Shift tensor so residue_k is at origin (Can't read any k_coord < residue_k)
+  // This aligns the tensor with BLK_K for all but the 0th k_tile
+  gA.data() = &gA(0, get<2>(residue_mnk), 0);
+  gB.data() = &gB(0, get<2>(residue_mnk), 0);
+
   // Partition the copying of A and B tiles across the threads
   auto gmem_thr_copy_A = copy_gA.get_slice(threadIdx.x);
   auto gmem_thr_copy_B = copy_gB.get_slice(threadIdx.x);
@@ -119,6 +130,33 @@ void gemm_device(
   Tensor tAsA = gmem_thr_copy_A.partition_D(sA);                             // (ACPY,ACPY_M,ACPY_K,PIPE)
   Tensor tBgB = gmem_thr_copy_B.partition_S(gB);                             // (BCPY,BCPY_N,BCPY_K,k)
   Tensor tBsB = gmem_thr_copy_B.partition_D(sB);                             // (BCPY,BCPY_N,BCPY_K,PIPE)
+
+  //
+  // PREDICATES
+  //
+
+  // Allocate predicate tensors for m and n
+  Tensor tApA = make_tensor<bool>(make_shape(size<1>(tAsA), size<2>(tAsA)), Stride<_1,_0>{});
+  Tensor tBpB = make_tensor<bool>(make_shape(size<1>(tBsB), size<2>(tBsB)), Stride<_1,_0>{});
+
+  // Construct identity layout for sA and sB
+  Tensor cA = make_identity_tensor(make_shape(size<0>(sA), size<1>(sA)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
+  Tensor cB = make_identity_tensor(make_shape(size<0>(sB), size<1>(sB)));    // (BLK_N,BLK_K) -> (blk_n,blk_k)
+
+  // Repeat the partitioning with identity layouts
+  Tensor tAcA = gmem_thr_copy_A.partition_S(cA);                             // (ACPY,ACPY_M,ACPY_K) -> (blk_m,blk_k)
+  Tensor tBcB = gmem_thr_copy_B.partition_S(cB);                             // (BCPY,BCPY_N,BCPY_K) -> (blk_n,blk_k)
+
+  // Set predicates for m bounds
+  CUTLASS_PRAGMA_UNROLL
+  for (int m = 0; m < size<0>(tApA); ++m) {
+    tApA(m,0) = get<0>(tAcA(0,m,0)) < get<0>(residue_mnk);  // blk_m coord < residue_m
+  }
+  // Set predicates for n bounds
+  CUTLASS_PRAGMA_UNROLL
+  for (int n = 0; n < size<0>(tBpB); ++n) {
+    tBpB(n,0) = get<0>(tBcB(0,n,0)) < get<1>(residue_mnk);  // blk_n coord < residue_n
+  }
 
   //
   // PREFETCH
@@ -130,13 +168,45 @@ void gemm_device(
   // Current tile index in gmem to read from
   auto k_tile_iter = make_coord_iterator(shape<2>(gA));
 
-  // Start async loads for all pipes but the last
-  CUTLASS_PRAGMA_UNROLL
-  for (int k_pipe = 0; k_pipe < K_PIPE_MAX-1; ++k_pipe) {
-    copy(copy_gA, tAgA(_,_,_,*k_tile_iter), tAsA(_,_,_,k_pipe));
-    copy(copy_gB, tBgB(_,_,_,*k_tile_iter), tBsB(_,_,_,k_pipe));
+  // Clear the smem tiles to account for predicated off loads
+  clear(tAsA);
+  clear(tBsB);
+
+  // Start async loads for 0th k-tile, where we take care of the k residue
+  {
+    constexpr int k_pipe = 0;
+
+    Tensor tAgAk = tAgA(_,_,_,*k_tile_iter);
+    CUTLASS_PRAGMA_UNROLL
+    for (int k = 0; k < size<2>(tAsA); ++k) {
+      if (get<1>(tAcA(0,0,k)) >= -get<2>(residue_mnk)) {      // blk_k coord < residue_k (gA shifted)
+        copy_if(copy_gA, tApA(_,k), tAgAk(_,_,k), tAsA(_,_,k,k_pipe));
+      }
+    }
+    Tensor tBgBk = tBgB(_,_,_,*k_tile_iter);
+    CUTLASS_PRAGMA_UNROLL
+    for (int k = 0; k < size<2>(tBsB); ++k) {
+      if (get<1>(tBcB(0,0,k)) >= -get<2>(residue_mnk)) {      // blk_k coord < residue_k (gB shifted)
+        copy_if(copy_gB, tBpB(_,k), tBgBk(_,_,k), tBsB(_,_,k,k_pipe));
+      }
+    }
     cp_async_fence();
-    if (--k_tile_count > 0) ++k_tile_iter;
+    ++k_tile_iter;
+    --k_tile_count;
+  }
+
+  // Start async loads for 1st k-tile onwards, no k-residue handling needed
+  CUTLASS_PRAGMA_UNROLL
+  for (int k_pipe = 1; k_pipe < K_PIPE_MAX-1; ++k_pipe) {
+    if (k_tile_count <= 0) {
+      clear(tApA);
+      clear(tBpB);
+    }
+    copy_if(copy_gA, tApA, tAgA(_,_,_,*k_tile_iter), tAsA(_,_,_,k_pipe));  // CpAsync
+    copy_if(copy_gB, tBpB, tBgB(_,_,_,*k_tile_iter), tBsB(_,_,_,k_pipe));  // CpAsync
+    cp_async_fence();
+    ++k_tile_iter;
+    --k_tile_count;
   }
 
   //
@@ -249,11 +319,13 @@ void gemm_device(
   // Epilogue
   //
 
-  // axpby(1.0f, accum, 0.0f, tCgC);
-
-  CUTE_UNROLL
+  Tensor cC = make_identity_tensor(make_shape(unwrap(shape<0>(gC)), unwrap(shape<1>(gC))));
+  Tensor tCcC = thr_mma.partition_C(cC);
+  CUTLASS_PRAGMA_UNROLL
   for (int i = 0; i < size(accum); ++i) {
+    if (elem_less(tCcC(i), make_coord(get<0>(residue_mnk), get<1>(residue_mnk)))) {
       tCgC(i) = accum(i) + tCgD(i);
+    }
   }
 }
 
@@ -312,8 +384,8 @@ void gemm_nt(
                                     Layout<Shape< _1,_8>>{});
 
   TiledMMA mmaC = make_tiled_mma(SM80_16x8x16_F32F16F16F32_TN{},
-                                 Layout<Shape<_2,_2,_1>>{},
-                                 Tile<_32,_32,_16>{});
+                                 Layout<Shape<_1,_4,_1>>{},
+                                 Tile<_64,_64,_16>{});
 
   auto copySA = make_tiled_copy_A(Copy_Atom<SM75_U32x4_LDSM_N, TA>{}, mmaC);
   auto copySB = make_tiled_copy_B(Copy_Atom<SM75_U32x4_LDSM_N, TB>{}, mmaC);
@@ -417,7 +489,7 @@ int main(int argc, char** argv)
   std::cout << "M = " << m << std::endl;
   std::cout << "N = " << n << std::endl;
   std::cout << "K = " << k << std::endl;
-  std::cout << "C = A^T B" << std::endl;
+  std::cout << "C = A B^T" << std::endl;
 
   thrust::host_vector<TA> h_A(m * k);
   thrust::host_vector<TB> h_B(n * k);
@@ -464,7 +536,7 @@ int main(int argc, char** argv)
     double diff = 0.0;
     for (int j = 0; j < m; ++j) {
       double tmp_diff = 0.0;
-      for (int i  = 0; i < n; ++i) {
+      for (int i = 0; i < n; ++i) {
         tmp_diff += abs(cute_result[j * n + i] - h_C_ref[j * n + i]);
       }
       diff += tmp_diff / n;
