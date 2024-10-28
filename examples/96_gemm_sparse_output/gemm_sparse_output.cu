@@ -42,23 +42,24 @@
 #include "cutlass/util/print_error.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/helper_cuda.hpp"
+#include "gather_tensor.hpp"
 
 template <class ProblemShape, class CtaTiler,
           class TA, class AStride, class ASmemLayout, class GmemTiledCopyA, class SmemTiledCopyA,
           class TB, class BStride, class BSmemLayout, class GmemTiledCopyB, class SmemTiledCopyB,
-          class TC, class CStride, class CSmemLayout, class TD, class DStride, class TiledMma>
+          class TC, class CStride, class CSmemLayout, class TD, class DStride, class TI, class TiledMma>
 __global__ static
 __launch_bounds__(decltype(size(TiledMma{}))::value)
 void gemm_device(
-  ProblemShape shape_MNK, CtaTiler cta_tiler,
+  ProblemShape shape_MNKL, CtaTiler cta_tiler,
   TA const* A, AStride dA, ASmemLayout sA_layout, GmemTiledCopyA copy_gA, SmemTiledCopyA copy_sA,
   TB const* B, BStride dB, BSmemLayout sB_layout, GmemTiledCopyB copy_gB, SmemTiledCopyB copy_sB,
-  TC      * C, CStride dC, CSmemLayout , TD const* D, DStride dD, TiledMma mma
+  TC      * C, CStride dC, CSmemLayout , TD const* D, DStride dD, TI const* I, TiledMma mma
 ) {
   using namespace cute;
 
   // Preconditions
-  CUTE_STATIC_ASSERT_V(rank(shape_MNK) == Int<3>{});                   // (M, N, K)
+  CUTE_STATIC_ASSERT_V(rank(shape_MNKL) == Int<4>{});                  // (M, N, K)
   CUTE_STATIC_ASSERT_V(rank(cta_tiler) == Int<3>{});                   // (BLK_M, BLK_N, BLK_K)
 
   CUTE_STATIC_ASSERT_V(size(copy_gA) == size(mma));                     // NumThreads
@@ -75,15 +76,20 @@ void gemm_device(
   CUTE_STATIC_ASSERT_V(size<1>(ASmemLayout{}) == size<2>(cta_tiler));  // BLK_K
   CUTE_STATIC_ASSERT_V(size<1>(BSmemLayout{}) == size<2>(cta_tiler));  // BLK_K
 
-  CUTE_STATIC_ASSERT_V(congruent(select<0,2>(shape_MNK), dA));         // dA strides for shape MK
-  CUTE_STATIC_ASSERT_V(congruent(select<1,2>(shape_MNK), dB));         // dB strides for shape NK
-  CUTE_STATIC_ASSERT_V(congruent(select<0,1>(shape_MNK), dC));         // dC strides for shape MN
+  CUTE_STATIC_ASSERT_V(congruent(select<0,2>(shape_MNKL), dA));         // dA strides for shape MK
+  CUTE_STATIC_ASSERT_V(congruent(select<1,2>(shape_MNKL), dB));         // dB strides for shape NK
+  CUTE_STATIC_ASSERT_V(congruent(select<0,1>(shape_MNKL), dC));         // dC strides for shape MN
 
   // Represent the full tensors
-  Tensor mA = make_tensor(make_gmem_ptr(A), select<0,2>(shape_MNK), dA); // (M,K)
-  Tensor mB = make_tensor(make_gmem_ptr(B), select<1,2>(shape_MNK), dB); // (N,K)
-  Tensor mC = make_tensor(make_gmem_ptr(C), select<0,1>(shape_MNK), dC); // (M,N)
-  Tensor mD = make_tensor(make_gmem_ptr(D), select<0,1>(shape_MNK), dD); // (M,N)
+  Tensor mA = make_tensor(make_gmem_ptr(A), select<0,2>(shape_MNKL), dA); // (M,K)
+  Tensor mB = make_tensor(make_gmem_ptr(B), select<1,2>(shape_MNKL), dB); // (N,K)
+  Tensor mD = make_tensor(make_gmem_ptr(D), select<0,1>(shape_MNKL), dD); // (M,N)
+
+  Tensor mC = make_tensor(make_gmem_ptr(C), ComposedLayout{
+    example::make_custom_stride_layout(dC, example::IndexedGather<TI>{I}),
+    as_arithmetic_tuple(repeat_like(select<3,1>(shape_MNKL), 0)),
+    make_identity_layout(select<3,1>(shape_MNKL))
+  });
 
   // Get the appropriate blocks for this thread block
   auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);              // (m,n,k)
@@ -93,9 +99,9 @@ void gemm_device(
   Tensor gD = local_tile(mD, cta_tiler, cta_coord, Step<_1,_1, X>{});  // (BLK_M,BLK_N)
 
   // Compute tile residues for predication
-  auto m_max_coord = size<0>(shape_MNK) - size<0>(gA) * blockIdx.x;   // M - BLK_M * m_coord
-  auto n_max_coord = size<1>(shape_MNK) - size<0>(gB) * blockIdx.y;   // N - BLK_N * n_coord
-  auto k_residue   = size<2>(shape_MNK) - size<1>(gA) * size<2>(gA);  // K - BLK_K * k_coord_max
+  auto m_max_coord = size<0>(shape_MNKL) - size<0>(gA) * blockIdx.x;   // M - BLK_M * m_coord
+  auto n_max_coord = size<1>(shape_MNKL) - size<0>(gB) * blockIdx.y;   // N - BLK_N * n_coord
+  auto k_residue   = size<2>(shape_MNKL) - size<1>(gA) * size<2>(gA);  // K - BLK_K * k_coord_max
   auto residue_mnk = make_tuple(m_max_coord, n_max_coord, k_residue);
 
   // Construct shared memory tiles
@@ -330,13 +336,14 @@ void gemm_device(
 }
 
 // Setup params for a NT GEMM
-template <class TA, class TB, class TC, class TD>
+template <class TA, class TB, class TC, class TD, class TI>
 void gemm_nt(
-  int m, int n, int k,
+  int m, int n, int k, int l,
   TA const* A, int ldA,
   TB const* B, int ldB,
   TC      * C, int ldC,
   TD const* D, int ldD,
+  TI const* I, int ldI,
   cudaStream_t stream = 0
 ) {
   using namespace cute;
@@ -345,7 +352,8 @@ void gemm_nt(
   auto M = int(m);
   auto N = int(n);
   auto K = int(k);
-  auto prob_shape = make_shape(M, N, K);                     // (M, N, K)
+  auto L = int(l);
+  auto prob_shape = make_shape(M, N, K, L);                  // (M, N, K, L)
 
   // Define NT strides (mixed)
   auto dA = make_stride(ldA, Int<1>{});                      // (dM, dK)
@@ -384,8 +392,8 @@ void gemm_nt(
                                     Layout<Shape< _1,_8>>{});
 
   TiledMMA mmaC = make_tiled_mma(SM80_16x8x16_F32F16F16F32_TN{},
-                                 Layout<Shape<_1,_4,_1>>{},
-                                 Tile<_64,_64,_16>{});
+                                 Layout<Shape<_2,_2,_1>>{},
+                                 Tile<_32,_32,_16>{});
 
   auto copySA = make_tiled_copy_A(Copy_Atom<SM75_U32x4_LDSM_N, TA>{}, mmaC);
   auto copySB = make_tiled_copy_B(Copy_Atom<SM75_U32x4_LDSM_N, TB>{}, mmaC);
@@ -403,14 +411,14 @@ void gemm_nt(
   dim3 dimBlock(size(mmaC));
   dim3 dimGrid(size(ceil_div(M, bM)),
                size(ceil_div(N, bN)));
-  
+
   if (smem_bytes >= (48 << 10)) {
     cudaFuncSetAttribute(
       gemm_device<
         decltype(prob_shape), decltype(cta_tiler),
         TA, decltype(dA), decltype(sA), decltype(copyGA), decltype(copySA),
         TB, decltype(dB), decltype(sB), decltype(copyGB), decltype(copySB),
-        TC, decltype(dC), decltype(sC), TD, decltype(dD), decltype(mmaC)
+        TC, decltype(dC), decltype(sC), TD, decltype(dD), TI, decltype(mmaC)
       >,
       cudaFuncAttributeMaxDynamicSharedMemorySize,
       smem_bytes
@@ -421,11 +429,11 @@ void gemm_nt(
     prob_shape, cta_tiler,
     A, dA, sA, copyGA, copySA,
     B, dB, sB, copyGB, copySB,
-    C, dC, sC, D, dD, mmaC
+    C, dC, sC, D, dD, I, mmaC
   );
 }
 
-template<typename ElementIn, typename ElementOut>
+template<class ElementIn, class ElementOut>
 int load_array_from_file(ElementOut* arr, std::string filepath) {
   std::cout << "Loading: " << filepath << std::endl;
   std::ifstream infile(filepath);
@@ -437,15 +445,15 @@ int load_array_from_file(ElementOut* arr, std::string filepath) {
   return length;
 }
 
-template<typename Element>
-void print_tensor(Element* arr, int rows, int cols) {
+template<class ElementIn, class ElementOut>
+void print_tensor(ElementIn* arr, int rows, int cols) {
   for (int i = 0; i < rows; ++i) {
     for (int j = 0; j < cols; ++j) {
-      printf("%f ", float(arr[i * cols + j]));
+      std::cout << ElementOut(arr[i * cols + j]) << " ";
     }
-    printf("\n");
+    std::cout << std::endl;
   }
-    printf("\n");
+  std::cout << std::endl;
 }
 
 int main(int argc, char** argv)
@@ -475,44 +483,53 @@ int main(int argc, char** argv)
   if (argc >= 4)
     sscanf(argv[3], "%d", &k);
 
-  char tmp_path[1024];
+  int l = 8192;
   if (argc >= 5)
-    sscanf(argv[4], "%1024s", &tmp_path);
+    sscanf(argv[4], "%d", &l);
+
+  char tmp_path[1024];
+  if (argc >= 6)
+    sscanf(argv[5], "%1024s", &tmp_path);
   std::string data_folder = tmp_path;
 
   using TA = cute::half_t;
   using TB = cute::half_t;
   using TC = cute::half_t;
   using TD = cute::half_t;
-  using TI = cute::half_t;
+  using TI = cute::uint32_t;
 
   std::cout << "M = " << m << std::endl;
   std::cout << "N = " << n << std::endl;
   std::cout << "K = " << k << std::endl;
+  std::cout << "L = " << l << std::endl;
   std::cout << "C = A B^T" << std::endl;
 
   thrust::host_vector<TA> h_A(m * k);
   thrust::host_vector<TB> h_B(n * k);
-  thrust::host_vector<TC> h_C(m * n);
+  thrust::host_vector<TC> h_C(l * n);
   thrust::host_vector<TD> h_D(1 * n);
-  thrust::host_vector<TC> h_C_ref(m * n);
+  thrust::host_vector<TI> h_I(1 * m);
+  thrust::host_vector<TC> h_C_ref(l * n);
 
   if (data_folder.length() > 0) {
     load_array_from_file<float, TA>(h_A.data(), data_folder + "/A.txt");
     load_array_from_file<float, TB>(h_B.data(), data_folder + "/B.txt");
     load_array_from_file<float, TC>(h_C_ref.data(), data_folder + "/C.txt");
     load_array_from_file<float, TD>(h_D.data(), data_folder + "/D.txt");
+    load_array_from_file<unsigned int, TI>(h_I.data(), data_folder + "/I.txt");
   } else {
     for (int j = 0; j < m * k; ++j) h_A[j] = static_cast<TA>( 2 * (rand() / double(RAND_MAX)) - 1 );
     for (int j = 0; j < n * k; ++j) h_B[j] = static_cast<TB>( 2 * (rand() / double(RAND_MAX)) - 1 );
-    for (int j = 0; j < m * n; ++j) h_C[j] = static_cast<TC>( -1 );
     for (int j = 0; j < 1 * n; ++j) h_D[j] = static_cast<TD>( 2 * (rand() / double(RAND_MAX)) - 1 );
+    for (int j = 0; j < 1 * m; ++j) h_I[j] = static_cast<TI>( l * (rand() / double(RAND_MAX)) );
   }
+  for (int j = 0; j < l * n; ++j) h_C[j] = static_cast<TC>( 0 );
 
   thrust::device_vector<TA> d_A = h_A;
   thrust::device_vector<TB> d_B = h_B;
   thrust::device_vector<TC> d_C = h_C;
   thrust::device_vector<TD> d_D = h_D;
+  thrust::device_vector<TI> d_I = h_I;
 
   double gflops = (2.0*m*n*k) * 1e-9;
 
@@ -522,11 +539,12 @@ int main(int argc, char** argv)
   // Run once
   d_C = h_C;
   gemm_nt(
-    m, n, k,
+    m, n, k, l,
     d_A.data().get(), k,
     d_B.data().get(), k,
     d_C.data().get(), n,
-    d_D.data().get(), 0
+    d_D.data().get(), 0,
+    d_I.data().get(), 0
   );
   CUTE_CHECK_LAST();
   thrust::host_vector<TC> cute_result = d_C;
@@ -534,7 +552,7 @@ int main(int argc, char** argv)
   // Check correctness
   if (data_folder.length() > 0) {
     double diff = 0.0;
-    for (int j = 0; j < m; ++j) {
+    for (int j = 0; j < l; ++j) {
       double tmp_diff = 0.0;
       for (int i = 0; i < n; ++i) {
         tmp_diff += abs(cute_result[j * n + i] - h_C_ref[j * n + i]);
@@ -547,34 +565,40 @@ int main(int argc, char** argv)
   }
 
 #if 0
-  printf("A:\n");
-  print_tensor<TA>(h_A.data(), m, k);
-  printf("B:\n");
-  print_tensor<TB>(h_B.data(), n, k);
+  printf("I:\n");
+  print_tensor<TI, int>(h_I.data(), 1, m);
+  printf("In:\n");
+  print_tensor<TA, float>(h_A.data(), m, k);
+  printf("Weight:\n");
+  print_tensor<TB, float>(h_B.data(), n, k);
+  printf("Bias:\n");
+  print_tensor<TB, float>(h_D.data(), 1, n);
   printf("Out:\n");
-  print_tensor<TC>(cute_result.data(), m, n);
+  print_tensor<TC, float>(cute_result.data(), l, n);
   printf("Ref:\n");
-  print_tensor<TC>(h_C_ref.data(), m, n);
+  print_tensor<TC, float>(h_C_ref.data(), l, n);
 #endif
 
   // Timing iterations
   for (int i = 0; i < timing_iterations; ++i) {
     gemm_nt(
-      m, n, k,
+      m, n, k, l,
       d_A.data().get(), k,
       d_B.data().get(), k,
       d_C.data().get(), n,
-      d_D.data().get(), 0
+      d_D.data().get(), 0,
+      d_I.data().get(), 0
     );
   }
   timer.start();
   for (int i = 0; i < timing_iterations; ++i) {
     gemm_nt(
-      m, n, k,
+      m, n, k, l,
       d_A.data().get(), k,
       d_B.data().get(), k,
       d_C.data().get(), n,
-      d_D.data().get(), 0
+      d_D.data().get(), 0,
+      d_I.data().get(), 0
     );
   }
   double cute_time = timer.seconds() / timing_iterations;

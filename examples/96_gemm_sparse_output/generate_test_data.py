@@ -12,12 +12,14 @@ TARGET_PATH = os.path.join(
 os.makedirs(TARGET_PATH, exist_ok=True)
 
 
-M = 5120
+M = 2024
 N = 5120
 K = 4096
-# M = 128
-# N = 256
+L = 5120
+# M = 5
+# N = 10
 # K = 64
+# L = 10
 
 
 def save_tensor(tensor: torch.Tensor, path: str, format: str):
@@ -31,24 +33,25 @@ def profile(fn, args, warmup=25, rep=100):
 
 
 if __name__ == '__main__':
-    x = torch.rand((M, K), dtype=torch.float16, device='cuda')
-    w = torch.rand((N, K), dtype=torch.float16, device='cuda')
-    b = torch.rand((N, ), dtype=torch.float16, device='cuda')
-    # x = torch.zeros((M, K), dtype=torch.float16, device='cuda')
-    # w = torch.zeros((N, K), dtype=torch.float16, device='cuda')
-    # x[0, 0:32] = 1
-    # w[0, 0:32] = 1
-    # x[0, 32:64] = 2
-    # w[0, 32:64] = 2
+    x = torch.randn((M, K), dtype=torch.float16, device='cuda')
+    w = torch.randn((N, K), dtype=torch.float16, device='cuda')
+    b = torch.randn((N, ), dtype=torch.float16, device='cuda')
+    i = torch.randperm(L, dtype=torch.int64, device='cuda')[:M]
+    y = torch.zeros((L, N), dtype=torch.float16, device='cuda')
+
     o = torch.nn.functional.linear(x, w, b)
-    print(f'({profile(torch.nn.functional.linear, [x, w, b])})ms')
+    y.scatter_(0, i[:, None].expand(M, N), o)
 
     save_tensor(x.to(torch.float32), os.path.join(TARGET_PATH, 'A.txt'), '%.6f')
     save_tensor(w.to(torch.float32), os.path.join(TARGET_PATH, 'B.txt'), '%.6f')
-    save_tensor(o.to(torch.float32), os.path.join(TARGET_PATH, 'C.txt'), '%.6f')
+    save_tensor(y.to(torch.float32), os.path.join(TARGET_PATH, 'C.txt'), '%.6f')
     save_tensor(b.to(torch.float32), os.path.join(TARGET_PATH, 'D.txt'), '%.6f')
+    save_tensor(i.to(torch.int32), os.path.join(TARGET_PATH, 'I.txt'), '%d')
+
+    print(f'Linear : ({profile(torch.nn.functional.linear, [x, w, b])})ms')
+    print(f'Scatter: ({profile(y.scatter_, [0, i[:, None].expand(M, N), o])})ms')
 
     cmd = os.path.join('.', EXAMPLE_PATH, '96_gemm_sparse_output')
-    cmd += f' {M} {N} {K} {TARGET_PATH}'
+    cmd += f' {M} {N} {K} {L} {TARGET_PATH}'
     with open(os.path.join(TARGET_PATH, 'cmd.txt'), 'w') as f:
         f.write(cmd)
