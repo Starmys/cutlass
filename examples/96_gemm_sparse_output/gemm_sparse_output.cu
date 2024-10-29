@@ -70,7 +70,7 @@ void gemm_device(
   static_assert(is_static<CSmemLayout>::value);
 
   CUTE_STATIC_ASSERT_V(size<0>(ASmemLayout{}) == size<0>(cta_tiler));  // BLK_M
-  CUTE_STATIC_ASSERT_V(size<1>(CSmemLayout{}) == size<0>(cta_tiler));  // BLK_M
+  CUTE_STATIC_ASSERT_V(size<0>(CSmemLayout{}) == size<0>(cta_tiler));  // BLK_M
   CUTE_STATIC_ASSERT_V(size<0>(BSmemLayout{}) == size<1>(cta_tiler));  // BLK_N
   CUTE_STATIC_ASSERT_V(size<1>(CSmemLayout{}) == size<1>(cta_tiler));  // BLK_N
   CUTE_STATIC_ASSERT_V(size<1>(ASmemLayout{}) == size<2>(cta_tiler));  // BLK_K
@@ -363,10 +363,10 @@ void gemm_nt(
 
   // Define CTA tile sizes (static)
   auto bM = Int<128>{};
-  auto bN = Int<128>{};
+  auto bN = Int<256>{};
   auto bK = Int< 64>{};
   auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
-  auto bP = Int<4>{};  // Pipeline
+  auto bP = Int<2>{};  // Pipeline
 
   // Define the smem layouts (static)
   auto sA = tile_to_shape(
@@ -385,18 +385,19 @@ void gemm_nt(
   // Define the thread layouts (static)
 
   TiledCopy copyGA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, TA>{},
-                                    Layout<Shape<_16,_8>, Stride<_8,_1>>{},
+                                    Layout<Shape<_32,_8>, Stride<_8,_1>>{},
                                     Layout<Shape< _1,_8>>{});
   TiledCopy copyGB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, TB>{},
-                                    Layout<Shape<_16,_8>, Stride<_8,_1>>{},
+                                    Layout<Shape<_32,_8>, Stride<_8,_1>>{},
                                     Layout<Shape< _1,_8>>{});
 
   TiledMMA mmaC = make_tiled_mma(SM80_16x8x16_F32F16F16F32_TN{},
-                                 Layout<Shape<_2,_2,_1>>{},
+                                 Layout<Shape<_2,_4,_1>>{},
                                  Tile<_32,_32,_16>{});
-
-  auto copySA = make_tiled_copy_A(Copy_Atom<SM75_U32x4_LDSM_N, TA>{}, mmaC);
-  auto copySB = make_tiled_copy_B(Copy_Atom<SM75_U32x4_LDSM_N, TB>{}, mmaC);
+// cute::make_tiled_mma(cute::GMMA::rs_op_selector<
+//       ElementA, ElementB, ElementAccumulator, TileShape_MNK, GMMA::Major::K, GMMA::Major::K>(), AtomLayoutMNK{})
+  auto copySA = make_tiled_copy_A(Copy_Atom<SM75_U32x2_LDSM_N, TA>{}, mmaC);
+  auto copySB = make_tiled_copy_B(Copy_Atom<SM75_U32x2_LDSM_N, TB>{}, mmaC);
 
 #if 0
   print(copyGA);
