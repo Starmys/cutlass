@@ -12,14 +12,14 @@ TARGET_PATH = os.path.join(
 os.makedirs(TARGET_PATH, exist_ok=True)
 
 
-M = 2024
-N = 5120
-K = 4096
-L = 5120
-# M = 512
-# N = 1536
-# K = 1536
-# L = 4096
+# M = 2024
+# N = 5120
+# K = 4096
+# L = 5120
+M = 512
+N = 1536
+K = 1536
+L = 4096
 
 
 def save_tensor(tensor: torch.Tensor, path: str, format: str):
@@ -28,7 +28,7 @@ def save_tensor(tensor: torch.Tensor, path: str, format: str):
         f.write(' '.join(map(lambda x: format % x, array)))
 
 
-def profile(fn, args, warmup=5, rep=10):
+def profile(fn, args, warmup=25, rep=100):
     return triton.testing.do_bench(lambda: fn(*args), warmup=warmup, rep=rep)
 
 
