@@ -43,7 +43,15 @@
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/helper_cuda.hpp"
 
-// #include <queue>
+__device__ uint32_t float2validx(float val, uint32_t idx) {
+  __half half_val = __float2half(val);
+  uint32_t bits_val = reinterpret_cast<uint16_t&>(half_val);
+  return (idx << 16) & bits_val;
+}
+
+__device__ bool compare(uint32_t a, uint32_t b) {
+  return *reinterpret_cast<__half*>(&a) < *reinterpret_cast<__half*>(&b);
+}
 
 template <class ProblemShape, class CtaTiler,
           class TA, class AStride, class ASmemLayout, class GmemTiledCopyA, class SmemTiledCopyA,
@@ -86,11 +94,10 @@ void gemm_device(
 
   // Get the appropriate blocks for this thread block
   // TODO: check gB and gC
-  auto cta_coord = make_coord(blockIdx.x, _, 0);              // (m,n,k)
+  auto cta_coord = make_coord(blockIdx.x, _, 0);                       // (m,n,k)
   Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1, X,_1>{});  // (BLK_M,BLK_K)
   Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step< X,_1,_1>{});  // (BLK_N,BLK_K,n)
-  // Tensor gC = make_tensor<float>(make_shape(blockDim.x, blockDim.y));  // (BLK_M,BLK_N)
-  Tensor gC = make_tensor<float>(Shape<_128, _128>{});  // (BLK_M,BLK_N)
+  Tensor gC = make_tensor<float>(select<0,1>(cta_tiler));              // (BLK_M,BLK_N)
 
   // Compute tile residues for predication
   auto m_max_coord = size<0>(shape_MNKL) - size<0>(gA) * blockIdx.x;   // M - BLK_M * m_coord
@@ -156,12 +163,6 @@ void gemm_device(
   Tensor tCrB = thr_mma.partition_fragment_B(sB(_,_,0));                     // (MMA,MMA_N,MMA_K)
   Tensor tCgC = thr_mma.partition_C(gC);                                     // (MMA,MMA_M,MMA_N)
   Tensor accum = thr_mma.make_fragment_C(tCgC);                              // (MMA,MMA_M,MMA_N)
-  // Tensor tCgC = make_tensor<TiledMma::FrgTypeC>(make_shape(
-  //   size<0>(tCrA),
-  //   size<1>(tCrA),
-  //   size<1>(tCrB)
-  // ));
-  // Tensor accum = thr_mma.make_fragment_C(tCgC);
 
   CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(accum));                     // MMA_M
   CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(accum));                     // MMA_N
@@ -172,7 +173,15 @@ void gemm_device(
   // CUTE_STATIC_ASSERT_V(size<0>(accum) == _4{});
   // CUTE_STATIC_ASSERT_V(size<1>(accum) == _4{});
   // CUTE_STATIC_ASSERT_V(size<2>(accum) == _8{});
-  // CUTE_STATIC_ASSERT(size(accum) == 128);
+  CUTE_STATIC_ASSERT(size(accum) == 32);
+
+  Tensor new_arr = make_tensor<uint32_t>(make_shape(_16{}, _2{}));
+  Tensor max_arr = make_tensor<uint32_t>(make_shape(_16{}, _4{}));
+
+  CUTLASS_PRAGMA_UNROLL
+  for (int i = 0; i < size(max_arr); i++) {
+    max_arr(i) = float2validx(-MAXFLOAT, 0);
+  }
 
   //
   // Copy Atom retiling
@@ -216,14 +225,10 @@ void gemm_device(
     copy(copy_sB, tCsB_p(_,_,Int<0>{}), tCrB_copy_view(_,_,Int<0>{}));
   }
 
-  // std::priority_queue<float> max_priority_queue;
-  // CUTLASS_PRAGMA_UNROLL
-  // for (int i = 0; i < 10; i++) {
-  //   max_priority_queue.push(-MAXFLOAT);
-  // }
-
-  float max_val = -MAXFLOAT;
-  float max_pos = 0.0f;
+  // float max_val = -MAXFLOAT;
+  // float max_pos = 0.0f;
+  const uint32_t warp_id = threadIdx.x / 32;
+  const uint32_t lane_id = threadIdx.x % 32;
 
   CUTLASS_PRAGMA_NO_UNROLL
   for (int n_tile_idx = 0; n_tile_count > -(PIPE_MAX-1); n_tile_idx++)
@@ -268,36 +273,80 @@ void gemm_device(
     });
 
     CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < size(accum); i++) {
+      new_arr(i) = float2validx(accum(i), n_tile_idx * size<1>(cta_tiler) + i);  // TODO
+    }
+
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < 16; i++) {  // Loop for rows
+      // Warp Sort (NewArr)
+      if (compare(new_arr(i, 1), new_arr(i, 0))) {
+        auto tmp = new_arr(i, 0);
+        new_arr(i, 0) = new_arr(i, 1);
+        new_arr(i, 1) = tmp;
+      }
+      CUTLASS_PRAGMA_UNROLL
+      for (int j = 0; j < 2; j++) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int lane_mask = 16; lane_mask > 0; lane_mask >>= 1) {
+          uint32_t x = __shfl_xor_sync(0xffffffff, new_arr(i, j), lane_mask);
+          if (compare(x, new_arr(i, j)) ^ ((lane_id ^ lane_mask) < lane_id)) {
+            new_arr(i, j) = x;
+          }
+        }
+      }
+      // Merge (Overwrite MaxArr)
+      if (compare(max_arr(i, 2), new_arr(i, 0))) {
+        max_arr(i, 2) = new_arr(i, 0);
+      }
+      if (compare(max_arr(i, 3), new_arr(i, 1))) {
+        max_arr(i, 3) = new_arr(i, 1);
+      }
+      // Warp Sort (MaxArr)
+      if (compare(max_arr(i, 0), max_arr(i, 2))) {
+        auto tmp = max_arr(i, 0);
+        max_arr(i, 0) = max_arr(i, 2);
+        max_arr(i, 2) = tmp;
+      }
+      if (compare(max_arr(i, 0), max_arr(i, 1))) {
+        auto tmp = max_arr(i, 0);
+        max_arr(i, 0) = max_arr(i, 1);
+        max_arr(i, 1) = tmp;
+      }
+      if (compare(max_arr(i, 2), max_arr(i, 3))) {
+        auto tmp = max_arr(i, 2);
+        max_arr(i, 2) = max_arr(i, 3);
+        max_arr(i, 3) = tmp;
+      }
+      CUTLASS_PRAGMA_UNROLL
+      for (int j = 0; j < 4; j++) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int lane_mask = 16; lane_mask > 0; lane_mask >>= 1) {
+          uint32_t x = __shfl_xor_sync(0xffffffff, max_arr(i, j), lane_mask);
+          if (compare(x, max_arr(i, j)) ^ (lane_id < (lane_id ^ lane_mask))) {
+            max_arr(i, j) = x;
+          }
+        }
+      }
+    }
+
+    CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < size(accum); ++i) {
       // Max
-      if (accum(i) > max_val) {
-        max_val = accum(i);
-        max_pos = n_tile_idx * size<1>(cta_tiler) + i;
-      }
-
-      // Thread => Row
-      // C[
-      //   (blockIdx.x * size<0>(cta_tiler) + threadIdx.x) * size<0>(dC)
-      //   +
-      //   (n_tile_idx * size<1>(cta_tiler) + i) * size<1>(dC)
-      // ] = accum(i);
+      // if (accum(i) > max_val) {
+      //   max_val = accum(i);
+      //   max_pos = n_tile_idx * size<1>(cta_tiler) + i;
+      // }
 
       // Row => Thread
       // auto cnt = atomicAdd(
-      //   reinterpret_cast<half*>(&C[(blockIdx.x * size<0>(cta_tiler) + int(accum(i)) + 1) * size<0>(dC) - 1]),
+      //   reinterpret_cast<half*>(&C[(int(accum(i)) + 1) * 320 - 1]),
       //   __float2half(1.0f)
       // );
-      // C[
-      //   (blockIdx.x * size<0>(cta_tiler) + int(accum(i))) * size<0>(dC)
-      //   +
-      //   int(cnt) * size<1>(dC)
-      // ] = threadIdx.x;
+      // C[int(accum(i)) * 320 + int(cnt)] = threadIdx.x;
 
-      // Duplicated: Priority-Queue
-      // if (accum(i) > max_priority_queue.top()) {
-      //   max_priority_queue.pop();
-      //   max_priority_queue.push(accum(i));
-      // }
+      // Row, Col => Thread
+      // C[int(accum(i)) * size<0>(dC) + int(cnt)] = threadIdx.x;
     }
 
     // atomicAdd(
@@ -313,9 +362,21 @@ void gemm_device(
   // Epilogue
   //
 
+  CUTLASS_PRAGMA_UNROLL
+  for (int i = 0; i < 16; i++) {
+    CUTLASS_PRAGMA_UNROLL
+    for (int j = 0; j < 4; j++) {
+      C[  // TODO
+        (blockIdx.x * size<0>(cta_tiler) + warp_id * 16 + i) * size<0>(dC)
+        +
+        j * 32 + lane_id
+      ] = max_arr(i, j);
+    }
+  }
+
   // Thread => Max
-  C[(blockIdx.x * size<0>(cta_tiler) + threadIdx.x) * size<0>(dC) + 0] = max_val;
-  C[(blockIdx.x * size<0>(cta_tiler) + threadIdx.x) * size<0>(dC) + 1] = max_pos;
+  // C[(blockIdx.x * size<0>(cta_tiler) + threadIdx.x % size<0>(cta_tiler)) * size<0>(dC) + 0] = max_val;
+  // C[(blockIdx.x * size<0>(cta_tiler) + threadIdx.x % size<0>(cta_tiler)) * size<0>(dC) + 1] = max_pos;
 
   // CUTLASS_PRAGMA_UNROLL
   // for (int i = 0; i < max_priority_queue.size(); ++i) {
@@ -352,11 +413,11 @@ void gemm_nt(
   auto dC = make_stride(ldC, Int<1>{});                      // (dM, dL)
 
   // Define CTA tile sizes (static)
-  auto bM = Int<128>{};
-  auto bN = Int<128>{};
+  auto bM = Int<64>{};
+  auto bN = Int<64>{};
   auto bK = Int<128>{};
   auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
-  auto bP = Int<2>{};  // Pipeline
+  auto bP = Int<4>{};  // Pipeline
 
   // Define the smem layouts (static)
   // auto sA = make_layout(make_shape(bM, bK)); // TODO
@@ -377,7 +438,7 @@ void gemm_nt(
   TiledCopy copyGA = make_tiled_copy(Copy_Atom<UniversalCopy<TA>, TA>{},
                                     Layout<Shape<_16,_8>, Stride<_8,_1>>{},
                                     Layout<Shape< _1,_8>>{});
-  TiledCopy copyGB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, TB>{},
+  TiledCopy copyGB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL<uint128_t>, TB>{},
                                     Layout<Shape<_16,_8>, Stride<_8,_1>>{},
                                     Layout<Shape< _1,_8>>{});
 
@@ -483,7 +544,7 @@ int main(int argc, char** argv)
 
   using TA = cute::half_t;
   using TB = cute::half_t;
-  using TC = cute::half_t;
+  using TC = uint32_t;
 
   std::cout << "M = " << m << std::endl;
   std::cout << "N = " << n << std::endl;

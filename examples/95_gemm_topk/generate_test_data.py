@@ -13,14 +13,14 @@ TARGET_PATH = os.path.join(
 os.makedirs(TARGET_PATH, exist_ok=True)
 
 
-# M = 128
-# N = 512
+# M = 64
+# N = 256
 # K = 128
-# L = 512
+# L = 320
 M = 65536
 N = 65536
 K = 128
-L = 512
+L = 128
 
 
 def save_tensor(tensor: torch.Tensor, path: str, format: str):
