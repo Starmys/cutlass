@@ -16,7 +16,7 @@ os.makedirs(TARGET_PATH, exist_ok=True)
 # M = 64
 # N = 256
 # K = 128
-# L = 320
+# L = 128
 M = 65536
 N = 65536
 K = 128
@@ -42,6 +42,7 @@ if __name__ == '__main__':
 
     p = torch.nn.functional.linear(q, k)
     # y = torch.topk(p, )
+    # import ipdb; ipdb.set_trace()
 
     save_tensor(q.to(torch.float32), os.path.join(TARGET_PATH, 'A.txt'), '%.6f')
     save_tensor(k.to(torch.float32), os.path.join(TARGET_PATH, 'B.txt'), '%.6f')
@@ -49,8 +50,8 @@ if __name__ == '__main__':
 
     print(f'Torch-Linear : ({profile(torch.nn.functional.linear, [q, k])})ms')
     q = q.reshape((1, M, 1, K))
-    k = k.reshape((1, M, 1, K))
-    v = v.reshape((1, M, 1, K))
+    k = k.reshape((1, N, 1, K))
+    v = v.reshape((1, N, 1, K))
     print(f'Flash-Attn   : ({profile(flash_attn_func, [q, k, v])})ms')
 
     cmd = os.path.join('.', EXAMPLE_PATH, '95_gemm_topk')
