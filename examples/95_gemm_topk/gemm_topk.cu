@@ -43,14 +43,21 @@
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/helper_cuda.hpp"
 
-__device__ uint32_t float2validx(float val, uint32_t idx) {
-  __half half_val = __float2half(val);
-  uint32_t bits_val = reinterpret_cast<uint16_t&>(half_val);
-  return (idx << 16) | bits_val;
+__device__ int32_t float2validx(float val, int32_t idx) {
+  // __half half_val = __float2half(val);
+  // int32_t bits_val = reinterpret_cast<uint16_t&>(half_val);
+  // return (bits_val << 16) | idx;
+  int32_t bits_val = reinterpret_cast<int32_t&>(val);
+  // if (bits_val < 0) bits_val = 0xffffffff;
+  // return ((bits_val & 0xfff80000) << 1) | idx;
+  return (bits_val & 0xfff80000) | idx;
 }
 
-__device__ bool compare(uint32_t a, uint32_t b) {
-  return *reinterpret_cast<__half*>(&a) < *reinterpret_cast<__half*>(&b);
+__device__ bool compare(int32_t a, int32_t b) {
+  return a < b;
+  // return *reinterpret_cast<__half*>(&a) < *reinterpret_cast<__half*>(&b);
+  // return *reinterpret_cast<char*>(&a) < *reinterpret_cast<char*>(&b);
+  // return (a & 0xffff) < (b & 0xffff);
 }
 
 template <class ProblemShape, class CtaTiler,
@@ -170,13 +177,9 @@ void gemm_device(
   CUTE_STATIC_ASSERT_V(size(copy_gA) == size(mma));
   CUTE_STATIC_ASSERT_V(size(copy_gB) == size(mma));
 
-  // CUTE_STATIC_ASSERT_V(size<0>(accum) == _4{});
-  // CUTE_STATIC_ASSERT_V(size<1>(accum) == _4{});
-  // CUTE_STATIC_ASSERT_V(size<2>(accum) == _8{});
   CUTE_STATIC_ASSERT(size(accum) == 64);
-
-  Tensor new_arr = make_tensor<uint32_t>(make_shape(_16{}, _4{}));
-  Tensor max_arr = make_tensor<uint32_t>(make_shape(_16{}, _4{}));
+  Tensor new_arr = make_tensor<int32_t>(make_shape(_64{}));
+  Tensor max_arr = make_tensor<int32_t>(make_shape(_64{}));
 
   CUTLASS_PRAGMA_UNROLL
   for (int i = 0; i < size(max_arr); i++) {
@@ -227,8 +230,8 @@ void gemm_device(
 
   // float max_val = -MAXFLOAT;
   // float max_pos = 0.0f;
-  const uint32_t warp_id = threadIdx.x / 32;
-  const uint32_t lane_id = threadIdx.x % 32;
+  // const auto warp_id = threadIdx.x / 32;
+  // const auto lane_id = threadIdx.x % 32;
 
   CUTLASS_PRAGMA_NO_UNROLL
   for (int n_tile_idx = 0; n_tile_count > -(PIPE_MAX-1); n_tile_idx++)
@@ -279,73 +282,60 @@ void gemm_device(
     }
 
     CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < 16; i++) {  // Loop for rows
-      // Warp Sort (NewArr)
-      if (compare(new_arr(i, 2), new_arr(i, 0))) {
-        auto tmp = new_arr(i, 0);
-        new_arr(i, 0) = new_arr(i, 2);
-        new_arr(i, 2) = tmp;
-      }
-      if (compare(new_arr(i, 1), new_arr(i, 0))) {
-        auto tmp = new_arr(i, 0);
-        new_arr(i, 0) = new_arr(i, 1);
-        new_arr(i, 1) = tmp;
-      }
-      if (compare(new_arr(i, 3), new_arr(i, 2))) {
-        auto tmp = new_arr(i, 2);
-        new_arr(i, 2) = new_arr(i, 3);
-        new_arr(i, 3) = tmp;
-      }
+    for (int k = 0; k < 6; k++) {
       CUTLASS_PRAGMA_UNROLL
-      for (int j = 0; j < 4; j++) {
+      for (int mask = 1 << k; mask > 0; mask >>= 1) {
         CUTLASS_PRAGMA_UNROLL
-        for (int lane_mask = 16; lane_mask > 0; lane_mask >>= 1) {
-          uint32_t x = __shfl_xor_sync(0xffffffff, new_arr(i, j), lane_mask);
-          if (compare(x, new_arr(i, j)) ^ ((lane_id ^ lane_mask) < lane_id)) {
-            new_arr(i, j) = x;
-          }
-        }
-      }
-      // Merge (Overwrite MaxArr)
-      if (compare(max_arr(i, 0), new_arr(i, 0))) {
-        max_arr(i, 0) = new_arr(i, 0);
-      }
-      if (compare(max_arr(i, 1), new_arr(i, 1))) {
-        max_arr(i, 1) = new_arr(i, 1);
-      }
-      if (compare(max_arr(i, 2), new_arr(i, 2))) {
-        max_arr(i, 2) = new_arr(i, 2);
-      }
-      if (compare(max_arr(i, 3), new_arr(i, 3))) {
-        max_arr(i, 3) = new_arr(i, 3);
-      }
-      // Warp Sort (MaxArr)
-      if (compare(max_arr(i, 0), max_arr(i, 2))) {
-        auto tmp = max_arr(i, 0);
-        max_arr(i, 0) = max_arr(i, 2);
-        max_arr(i, 2) = tmp;
-      }
-      if (compare(max_arr(i, 0), max_arr(i, 1))) {
-        auto tmp = max_arr(i, 0);
-        max_arr(i, 0) = max_arr(i, 1);
-        max_arr(i, 1) = tmp;
-      }
-      if (compare(max_arr(i, 2), max_arr(i, 3))) {
-        auto tmp = max_arr(i, 2);
-        max_arr(i, 2) = max_arr(i, 3);
-        max_arr(i, 3) = tmp;
-      }
-      CUTLASS_PRAGMA_UNROLL
-      for (int j = 0; j < 4; j++) {
-        CUTLASS_PRAGMA_UNROLL
-        for (int lane_mask = 16; lane_mask > 0; lane_mask >>= 1) {
-          uint32_t x = __shfl_xor_sync(0xffffffff, max_arr(i, j), lane_mask);
-          if (compare(x, max_arr(i, j)) ^ (lane_id < (lane_id ^ lane_mask))) {
-            max_arr(i, j) = x;
+        for (int j = 0; j < size(new_arr); j++) {
+          int i = j ^ mask;
+          if (j < i && (((i >> (k + 1)) % 2) ^ compare(new_arr(i), new_arr(j)))) {
+            auto tmp = new_arr(i);
+            new_arr(i) = new_arr(j);
+            new_arr(j) = tmp;
           }
         }
       }
     }
+
+    // CUTLASS_PRAGMA_UNROLL
+    // for (int lane_mask = 1; lane_mask > 0; lane_mask >>= 1) {
+    //   CUTLASS_PRAGMA_UNROLL
+    //   for (int j = 0; j < 64; j++) {
+    //     int32_t x = __shfl_xor_sync(0xffffffff, new_arr(j), lane_mask);
+    //     if (compare(x, new_arr(j)) ^ ((lane_id ^ lane_mask) < lane_id)) {
+    //       new_arr(j) = x;
+    //     }
+    //   }
+    // }
+    // Merge (Overwrite MaxArr)
+    CUTLASS_PRAGMA_UNROLL
+    for (int j = 0; j < min(size(max_arr), size(new_arr)); j++) {
+      if (compare(max_arr(j), new_arr(j))) {
+        max_arr(j) = new_arr(j);
+      }
+    }
+    CUTLASS_PRAGMA_UNROLL
+    for (int mask = size(max_arr); mask > 0; mask >>= 1) {
+      CUTLASS_PRAGMA_UNROLL
+      for (int j = 0; j < size(max_arr); j++) {
+        int i = j ^ mask;
+        if ((j < i) && compare(max_arr(j), max_arr(i))) {
+          auto tmp = max_arr(i);
+          max_arr(i) = max_arr(j);
+          max_arr(j) = tmp;
+        }
+      }
+    }
+    // CUTLASS_PRAGMA_UNROLL
+    // for (int lane_mask = 1; lane_mask > 0; lane_mask >>= 1) {
+    //   CUTLASS_PRAGMA_UNROLL
+    //   for (int j = 0; j < size(max_arr); j++) {
+    //     int32_t x = __shfl_xor_sync(0xffffffff, max_arr(j), lane_mask);
+    //     if (compare(x, max_arr(j)) ^ ((lane_id ^ lane_mask) > lane_id)) {
+    //       max_arr(j) = x;
+    //     }
+    //   }
+    // }
 
     // CUTLASS_PRAGMA_UNROLL
     // for (int i = 0; i < size(accum); ++i) {
@@ -375,15 +365,12 @@ void gemm_device(
   //
 
   CUTLASS_PRAGMA_UNROLL
-  for (int i = 0; i < 16; i++) {
-    CUTLASS_PRAGMA_UNROLL
-    for (int j = 0; j < 4; j++) {
-      C[  // TODO
-        (blockIdx.x * size<0>(cta_tiler) + warp_id * 16 + i) * size<0>(dC)
-        +
-        j * 32 + lane_id
-      ] = max_arr(i, j);
-    }
+  for (int j = 0; j < size(max_arr); j++) {
+    C[  // TODO
+      (blockIdx.x * size<0>(cta_tiler) + threadIdx.x / 2) * size<0>(dC)
+      +
+      (threadIdx.x % 2) * size(max_arr) + j
+    ] = max_arr(j);
   }
 
   // Thread => Max
@@ -415,11 +402,11 @@ void gemm_nt(
   auto dC = make_stride(ldC, Int<1>{});                      // (dM, dL)
 
   // Define CTA tile sizes (static)
-  auto bM = Int<64>{};
-  auto bN = Int<128>{};
+  auto bM = Int<128>{};
+  auto bN = Int<64>{};
   auto bK = Int<128>{};
   auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
-  auto bP = Int<2>{};  // Pipeline
+  auto bP = Int<3>{};  // Pipeline
 
   // Define the smem layouts (static)
   // auto sA = make_layout(make_shape(bM, bK)); // TODO
@@ -446,7 +433,7 @@ void gemm_nt(
 
   TiledMMA mmaC = make_tiled_mma(SM80_16x8x16_F32F16F16F32_TN{},
                                  Layout<Shape<_4,_1,_1>>{},
-                                 Tile<_64,_64,_16>{});
+                                 Tile<_128,_64,_16>{});
 
   auto copySA = make_tiled_copy_A(Copy_Atom<SM75_U32x4_LDSM_N, TA>{}, mmaC);
   auto copySB = make_tiled_copy_B(Copy_Atom<SM75_U32x4_LDSM_N, TB>{}, mmaC);
@@ -546,7 +533,7 @@ int main(int argc, char** argv)
 
   using TA = cute::half_t;
   using TB = cute::half_t;
-  using TC = uint32_t;
+  using TC = int32_t;
 
   std::cout << "M = " << m << std::endl;
   std::cout << "N = " << n << std::endl;
